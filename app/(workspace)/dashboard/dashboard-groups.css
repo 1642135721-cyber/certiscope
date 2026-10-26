@@ -1,0 +1,131 @@
+.dashboard-project-count {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #fff2dc;
+  color: #a86614 !important;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.dashboard-group-hint {
+  margin-top: 7px;
+  color: #73877e;
+  font-size: 12px;
+}
+
+.dashboard-work-group,
+.dashboard-task-group {
+  min-width: 0;
+}
+
+.dashboard-work-group + .dashboard-work-group,
+.dashboard-task-group + .dashboard-task-group {
+  margin-top: 5px;
+}
+
+.dashboard-work-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 31px;
+  border-bottom: 1px solid #e5ece8;
+  color: #204d38;
+}
+
+.dashboard-work-group-head strong {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-work-group-head span {
+  flex-shrink: 0;
+  color: #789188;
+  font-size: 11px;
+}
+
+.dashboard-attention-row {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 9px;
+  min-height: 58px;
+  padding: 8px 4px;
+  border-bottom: 1px solid #edf1ee;
+  color: #173b2e;
+}
+
+.dashboard-attention-row:last-child {
+  border-bottom: 0;
+}
+
+.dashboard-attention-row:hover,
+.dashboard-task-group .dashboard-task-item:hover {
+  background: #f4faf6;
+}
+
+.dashboard-attention-row > svg {
+  color: #6b8778;
+}
+
+.dashboard-work-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+}
+
+.dashboard-work-icon-amber {
+  background: #fff2de;
+  color: #b97918;
+}
+
+.dashboard-work-icon-blue {
+  background: #e5f4ff;
+  color: #2783b3;
+}
+
+.dashboard-work-icon-red {
+  background: #ffebeb;
+  color: #bd5d51;
+}
+
+.dashboard-work-row-copy {
+  min-width: 0;
+}
+
+.dashboard-work-row-copy strong,
+.dashboard-work-row-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-work-row-copy strong {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.dashboard-work-row-copy small {
+  margin-top: 4px;
+  color: #769087;
+  font-size: 11px;
+}
+
+.dashboard-task-group .dashboard-task-item {
+  margin-top: 6px;
+}
+
+.dashboard-events {
+  max-height: 180px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding-left: 10px;
+  padding-right: 4px;
+}
