@@ -1,0 +1,92 @@
+[
+  {
+    "text": "设备手册第2页显示，SCharger-7KS-S0/SCharger-22KT-S0 的充电功率可配置范围为 1.4 kW 至 22 kW，且额定电压包含 230V±20% (单相) 和 400V±20% (三相)，从技术参数上满足 Level 2 (208-240V) 或更高充电容量要求。",
+    "citations": [
+      {
+        "note": "逐页文字；空间位置需核对原件",
+        "page": 2,
+        "materialVersionId": "fixture-device-manual"
+      }
+    ]
+  },
+  {
+    "text": "设备手册列明通信方式包括 Wi-Fi/Ethernet，协议包括 Modbus TCP 和 OCPP 1.6，表明硬件具备联网基础能力。",
+    "citations": [
+      {
+        "note": "逐页文字；空间位置需核对原件",
+        "page": 2,
+        "materialVersionId": "fixture-device-manual"
+      }
+    ]
+  },
+  {
+    "text": "设备手册列明车辆连接接口为 Type 2 socket。",
+    "citations": [
+      {
+        "note": "逐页文字；空间位置需核对原件",
+        "page": 2,
+        "materialVersionId": "fixture-device-manual"
+      }
+    ]
+  },
+  {
+    "text": "设备手册第9页描述了过压、欠压、过热及过流保护机制，其中提到输入电压正常范围及三相输入检测逻辑，佐证了设备对电气安全标准的遵循。",
+    "citations": [
+      {
+        "note": "逐页文字；空间位置需核对原件",
+        "page": 9,
+        "materialVersionId": "fixture-device-manual"
+      }
+    ]
+  },
+  {
+    "text": "设备手册显示车辆连接接口为Type 2插座，符合IEC 62196标准（适用于非美国地区）。",
+    "citations": [
+      {
+        "note": "逐页文字；空间位置需核对原件",
+        "page": 2,
+        "materialVersionId": "fixture-device-manual"
+      }
+    ]
+  },
+  {
+    "text": "设备手册显示充电功率可配置范围为1.4 kW至7.4 kW（单相）及1.4 kW至22 kW（三相），满足Level 2及以上容量要求。",
+    "citations": [
+      {
+        "note": "逐页文字；空间位置需核对原件",
+        "page": 2,
+        "materialVersionId": "fixture-device-manual"
+      }
+    ]
+  },
+  {
+    "text": "设备手册列明认证方式包括RFID (ISO-14443-A)、App和蓝牙，以及远程控制与监控通过App实现。",
+    "citations": [
+      {
+        "note": "逐页文字；空间位置需核对原件",
+        "page": 2,
+        "materialVersionId": "fixture-device-manual"
+      }
+    ]
+  },
+  {
+    "text": "设备手册列明工作模式包括Normal Charge、Scheduled Charge、PV Power Preferred及Next Trip（仅限EMMA-A02）。",
+    "citations": [
+      {
+        "note": "逐页文字；空间位置需核对原件",
+        "page": 2,
+        "materialVersionId": "fixture-device-manual"
+      }
+    ]
+  },
+  {
+    "text": "设备手册包含过压、欠压、过热、过流等保护机制说明，表明设备具备基本的安全运行条件。",
+    "citations": [
+      {
+        "note": "逐页文字；空间位置需核对原件",
+        "page": 9,
+        "materialVersionId": "fixture-device-manual"
+      }
+    ]
+  }
+]

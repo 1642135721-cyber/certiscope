@@ -10,7 +10,7 @@
     "check:fix": "biome check --write",
     "lint": "biome lint",
     "format": "biome format --write",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
     "@supabase/ssr": "0.12.7",

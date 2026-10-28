@@ -1,5 +1,6 @@
 import type { BasisRetrievalReceipt } from "./basis-retrieval";
 import type { GvConditionCoverage } from "./condition-catalog";
+import type { GvRuleGuidance } from "./knowledge/gv-guidance";
 import { type GvRuleCode, gvRules, ruleApplies } from "./rule-catalog";
 import type { ReviewOutcome, SemanticSupport, SourceLocation } from "./types";
 
@@ -66,9 +67,15 @@ export type GvComputedResult = {
   citations?: SourceLocation[];
   retrievedSources?: SourceLocation[];
   humanQuestions?: string[];
-  supportedFindings?: { text: string; citations: SourceLocation[] }[];
+  supportedFindings?: {
+    text: string;
+    citations: SourceLocation[];
+    sourceStatements?: string[];
+  }[];
   unverifiedFindings?: { text: string; citations: SourceLocation[] }[];
   basisRetrieval?: BasisRetrievalReceipt;
+  ruleGuidance?: GvRuleGuidance[];
+  ruleGuidanceStatus?: "FOUND" | "NOT_FOUND" | "FAILED";
   conditionCoverage?: GvConditionCoverage[];
   visualEvidenceUsed?: boolean;
   quantityThresholdMetDespiteConflict?: boolean;

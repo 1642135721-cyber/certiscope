@@ -38,6 +38,34 @@ export default async function TasksPage() {
         .in("id", roundIds)
     : { data: [] };
   const roundById = new Map((rounds ?? []).map((round) => [round.id, round]));
+  const [{ data: runs }, { data: decisions }] = await Promise.all([
+    roundIds.length
+      ? context.supabase
+          .from("gv_processing_runs")
+          .select("round_id, scope_confirmed_at, cleared_at")
+          .in("round_id", roundIds)
+          .order("created_at", { ascending: false })
+      : Promise.resolve({ data: [] }),
+    roundIds.length
+      ? context.supabase
+          .from("gv_rule_decisions")
+          .select("round_id, scope_confirmed_at")
+          .in("round_id", roundIds)
+      : Promise.resolve({ data: [] }),
+  ]);
+  const latestRunByRound = new Map<string, NonNullable<typeof runs>[number]>();
+  for (const run of runs ?? [])
+    if (!latestRunByRound.has(run.round_id))
+      latestRunByRound.set(run.round_id, run);
+  const decidedRounds = new Set(
+    (decisions ?? [])
+      .filter(
+        (item) =>
+          item.scope_confirmed_at ===
+          roundById.get(item.round_id)?.scope_confirmed_at,
+      )
+      .map((item) => item.round_id),
+  );
 
   return (
     <WorkspaceFrame actor={context.actor} active="tasks">
@@ -55,17 +83,37 @@ export default async function TasksPage() {
             <span className="flex items-center gap-3"><strong className="text-lg text-[#0b5d3e]">LT · 交通与场地</strong><span className="rounded-full bg-[#e9f6ef] px-2.5 py-1 text-xs text-[#168258]">{current.length + showcaseTasks.filter((item) => item.category === "LT").length} 项信用项任务</span></span>
             <ChevronDown size={19} className="text-[#5c796a]" />
           </summary>
-          <div className="grid grid-cols-[minmax(220px,1.3fr)_minmax(120px,1fr)_minmax(130px,1fr)_110px_100px] gap-3 bg-[#f5faf7] px-6 py-3 text-xs font-semibold text-[#6d8a7a]"><span>审核任务</span><span>所属项目</span><span>轮次与阶段</span><span>当前状态</span><span>入口</span></div>
+          <div className="grid grid-cols-[minmax(220px,1.3fr)_minmax(120px,1fr)_minmax(130px,1fr)_110px_100px] gap-3 bg-[#f5faf7] px-6 py-3 text-xs font-semibold text-[#6d8a7a]"><span>审核任务</span><span>所属项目</span><span>轮次与阶段</span><span className="-ml-[18px]">当前状态</span><span>入口</span></div>
           <div className="divide-y divide-[#edf1ee]">
             {current.length ? current.map((task) => {
               const round = roundById.get(task.current_round_id ?? "");
-              const state = !round?.scope_confirmed_at ? "范围待确认" : round.status === "returned" ? "待复核" : "待审核";
-              const href = !round?.scope_confirmed_at ? `/tasks/${task.id}` : `/tasks/${task.id}/materials`;
+              const latestRun = latestRunByRound.get(round?.id ?? "");
+              const hasCurrentRun = Boolean(
+                latestRun &&
+                !latestRun.cleared_at &&
+                latestRun.scope_confirmed_at === round?.scope_confirmed_at,
+              );
+              const state = !round?.scope_confirmed_at
+                ? "范围待确认"
+                : round.status === "submitted"
+                  ? "意见已提交"
+                  : round.status === "returned"
+                    ? "待复核"
+                    : decidedRounds.has(round.id)
+                      ? "审核中"
+                      : hasCurrentRun
+                        ? "待人工复核"
+                        : "待初审";
+              const href = !round?.scope_confirmed_at
+                ? `/tasks/${task.id}`
+                : hasCurrentRun
+                  ? `/tasks/${task.id}/review`
+                  : `/tasks/${task.id}/materials`;
               return <div key={task.id} className="grid grid-cols-[minmax(220px,1.3fr)_minmax(120px,1fr)_minmax(130px,1fr)_110px_100px] items-center gap-3 px-6 py-4 text-sm">
                 <div><strong className="block">LT · Green Vehicles</strong><span className="text-xs text-[#72877b]">{pathLabel(task)}</span></div>
                 <Link href={`/projects/${task.project_id}`} className="font-medium text-[#0b7450] hover:underline">{task.projects?.name ?? "项目资料待读取"}</Link>
                 <span className="text-[#597366]">第 {round?.sequence ?? 1} 轮 · {task.stage || "阶段待确认"}</span>
-                <span className="text-[#a87829]">{state}</span>
+                <span className="-ml-[18px] text-[#a87829]">{state}</span>
                 <Link href={href} className="inline-flex items-center gap-1 font-semibold text-[#087d51]">进入任务 <ArrowRight size={16} /></Link>
               </div>;
             }) : <p className="px-6 py-4 text-sm text-[#809489]">当前没有待处理的真实审核任务。</p>}
@@ -74,7 +122,7 @@ export default async function TasksPage() {
               return <div key={item.id} className="grid grid-cols-[minmax(220px,1.3fr)_minmax(120px,1fr)_minmax(130px,1fr)_110px_100px] items-center gap-3 px-6 py-4 text-sm">
                 <div><strong className="block">LT · {item.credit}</strong><span className="text-xs text-[#829589]">{item.focus}</span></div>
                 <Link href={`/showcase/projects/${item.projectId}`} className="font-medium text-[#0b7450] hover:underline">{project?.name}</Link>
-                <span className="text-[#597366]">{item.round}</span><span className="text-[#a87829]">{item.status}</span>
+                <span className="text-[#597366]">{item.round}</span><span className="-ml-[18px] text-[#a87829]">{item.status}</span>
                 <Link href={`/showcase/tasks/${item.id}`} className="inline-flex items-center gap-1 font-semibold text-[#087d51]">查看详情 <ArrowRight size={16}/></Link>
               </div>;
             })}
@@ -84,13 +132,13 @@ export default async function TasksPage() {
           const categoryTasks = showcaseTasks.filter((item) => item.category === category.code);
           return <details key={category.code} className="rounded-2xl border border-[#dfece3] bg-white shadow-sm">
             <summary className="flex cursor-pointer list-none items-center justify-between px-6 py-4"><span className="flex items-center gap-3"><strong className="text-lg text-[#0b5d3e]">{category.code} · {category.name}</strong><span className="rounded-full bg-[#e9f6ef] px-2.5 py-1 text-xs text-[#168258]">{categoryTasks.length} 项任务</span></span><ChevronDown size={19} className="text-[#5c796a]" /></summary>
-            <div className="grid grid-cols-[minmax(220px,1.3fr)_minmax(120px,1fr)_minmax(130px,1fr)_110px_100px] gap-3 bg-[#f5faf7] px-6 py-3 text-xs font-semibold text-[#6d8a7a]"><span>审核任务</span><span>所属项目</span><span>轮次与阶段</span><span>当前状态</span><span>入口</span></div>
+            <div className="grid grid-cols-[minmax(220px,1.3fr)_minmax(120px,1fr)_minmax(130px,1fr)_110px_100px] gap-3 bg-[#f5faf7] px-6 py-3 text-xs font-semibold text-[#6d8a7a]"><span>审核任务</span><span>所属项目</span><span>轮次与阶段</span><span className="-ml-[18px]">当前状态</span><span>入口</span></div>
             <div className="divide-y divide-[#edf1ee]">{categoryTasks.map((item) => {
               const project = showcaseProject(item.projectId);
               return <div key={item.id} className="grid grid-cols-[minmax(220px,1.3fr)_minmax(120px,1fr)_minmax(130px,1fr)_110px_100px] items-center gap-3 px-6 py-4 text-sm">
                 <div><strong className="block">{item.category} · {item.credit}</strong><span className="text-xs text-[#829589]">{item.focus}</span></div>
                 <Link href={`/showcase/projects/${item.projectId}`} className="font-medium text-[#0b7450] hover:underline">{project?.name}</Link>
-                <span className="text-[#597366]">{item.round}</span><span className="text-[#a87829]">{item.status}</span>
+                <span className="text-[#597366]">{item.round}</span><span className="-ml-[18px] text-[#a87829]">{item.status}</span>
                 <Link href={`/showcase/tasks/${item.id}`} className="inline-flex items-center gap-1 font-semibold text-[#087d51]">查看详情 <ArrowRight size={16}/></Link>
               </div>;
             })}</div>

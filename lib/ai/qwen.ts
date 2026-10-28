@@ -5,10 +5,12 @@ import type {
   AiResult,
   EvidenceAssessment,
   LocatedContent,
+  R05SignageAssessment,
   RuleEvidenceAssessment,
+  RuleGuidanceSuggestion,
 } from "@/lib/ai/provider";
 import { gvFieldInstruction } from "@/lib/gv/field-catalog";
-import type { FactCandidate } from "@/lib/gv/types";
+import type { FactCandidate, SourceLocation } from "@/lib/gv/types";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -18,6 +20,43 @@ function isRecord(value: unknown): value is JsonRecord {
 
 function asTextParts(parts: LocatedContent[]) {
   return parts.map(({ text, source }) => ({ text: text ?? "", source }));
+}
+
+function normalizeSource(value: unknown): SourceLocation | null {
+  if (!isRecord(value)) return null;
+  const materialVersionId =
+    value.materialVersionId ?? value.material_version_id;
+  if (typeof materialVersionId !== "string") return null;
+  return {
+    materialVersionId,
+    ...(Number.isInteger(value.page) ? { page: value.page as number } : {}),
+    ...(Number.isInteger(value.image) ? { image: value.image as number } : {}),
+    ...(typeof value.sheet === "string" ? { sheet: value.sheet } : {}),
+    ...(typeof value.cell === "string" ? { cell: value.cell } : {}),
+    ...(Number.isInteger(value.paragraph)
+      ? { paragraph: value.paragraph as number }
+      : {}),
+  };
+}
+
+function normalizeFindings(value: unknown) {
+  return Array.isArray(value)
+    ? value.flatMap((item) =>
+        isRecord(item) && typeof item.text === "string"
+          ? [
+              {
+                text: item.text,
+                citations: Array.isArray(item.citations)
+                  ? item.citations.flatMap((source) => {
+                      const normalized = normalizeSource(source);
+                      return normalized ? [normalized] : [];
+                    })
+                  : [],
+              },
+            ]
+          : [],
+      )
+    : [];
 }
 
 export class QwenProvider implements AiProvider {
@@ -252,7 +291,7 @@ export class QwenProvider implements AiProvider {
           ) === index,
       );
     return this.ask<{ assessments: JsonRecord[] }>(
-      "逐条核查给定 GV 规则的证据语义支持程度。每条只能使用该条 question.evidenceParts 中的材料；ruleSource 是已锁定规则来源，不能由项目材料修改。每条返回 ruleCode、support(supports|partial|insufficient|conflicts|unknown)、citations、gaps、humanQuestions、supportedFindings、unverifiedFindings。后两个字段是简短易懂的中文数组，每项为 {text,citations}。积极识别材料明确写出的、与本规则有关的事实和子条件：例如设备手册写明某型号的电压、连接器或联网方式，可以分别列为有材料支持的事实；不要因项目选型尚未证实而把手册中可引用的规格也写成完全没有证据。若只有设备手册，没有项目设备清单或图纸证明实际采用，该项目采用关系须放入 unverifiedFindings 和 humanQuestions，support 至多 partial。严格区分“设备手册列明 Wi-Fi／Ethernet 或 OCPP”和“本项目已联网、IP 可寻址”；严格区分“定时充电模式”和“能够参与需求响应或分时电价”，后两项不能由前两项推断。supportedFindings 每项必须附可定位材料引用；unverifiedFindings 说明尚未证实的项目条件和审核员要找的材料，text 须用“请核对……”或“是否……”等待核对措辞，不得把未证实的项目采用、联网或 DR／TOU 配置写成已成立的事实；不得把数量暂达标说成整项通过。只回答当前规则，不重复其他规则的总车位等背景事实。引用必须指向对应规则输入材料中的 materialVersionId 和实际页/工作表，不得引用不存在的文件或自创阈值。不得给出 GV 最终专业结论；缺少空间核数、项目采用或规则来源差异时保留人工问题。返回 {assessments:[...]}。",
+      "逐条核查给定 GV 规则的证据语义支持程度。每条只能使用该条 question.evidenceParts 中的材料；ruleSource 是已锁定规则来源，不能由项目材料修改。每条返回 ruleCode、support(supports|partial|insufficient|conflicts|unknown)、citations、gaps、humanQuestions、supportedFindings、unverifiedFindings。后两个字段是简短易懂的中文数组，每项为 {text,citations}。逐项列全有材料支持的本规则子事实，不因另一子条件待核就省略已证实的数量、图纸标识或设备规格，也不要把不同子条件压缩成模糊的一条。R05 必须区分材料申报设置的充电车位数与按 2% 算出的最低要求；若两者都有来源，应写明申报数量是否暂达下限，不能只写最低需要多少。图纸若清楚显示充电车位专用标识的颜色、图标或位置，另列一条并引用该图纸页；看不清时不要猜。已申报达到数量下限时，不要重复要求审核员确认申报数量是否达到同一下限，而应核对最终车位位号、落位、设备对应及与优先车位是否重叠。R05 不把 RFID／App 等设备功能作为车位数量与独立性的支持事实。设备手册写明某型号的电压、连接器或联网方式，可在 R06 分别列为有材料支持的手册事实；不要因项目选型尚未证实而把手册中可引用的规格也写成完全没有证据。若只有设备手册，没有项目设备清单或图纸证明实际采用，该项目采用关系须放入 unverifiedFindings 和 humanQuestions，support 至多 partial。严格区分“设备手册列明 Wi-Fi／Ethernet 或 OCPP”和“本项目已联网、IP 可寻址”；严格区分“定时充电模式”和“能够参与需求响应或分时电价”，后两项不能由前两项推断。supportedFindings 每项必须附可定位材料引用；unverifiedFindings 说明尚未证实的项目条件和审核员要找的材料，text 须用“请核对……”或“是否……”等待核对措辞，不得把未证实的项目采用、联网或 DR／TOU 配置写成已成立的事实；不得把数量暂达标说成整项通过。只回答当前规则，不重复其他规则的总车位等背景事实。引用必须指向对应规则输入材料中的 materialVersionId 和实际页/工作表，不得引用不存在的文件或自创阈值。不得给出 GV 最终专业结论；缺少空间核数、项目采用或规则来源差异时保留人工问题。返回 {assessments:[...]}。",
       {
         ...input,
         questions: input.questions.map((question) => ({
@@ -283,20 +322,90 @@ export class QwenProvider implements AiProvider {
             value: result.value.assessments.map((item) => ({
               ruleCode: String(item.ruleCode),
               support: item.support as RuleEvidenceAssessment["support"],
-              citations: Array.isArray(item.citations) ? item.citations : [],
+              citations: Array.isArray(item.citations)
+                ? item.citations.flatMap((source) => {
+                    const normalized = normalizeSource(source);
+                    return normalized ? [normalized] : [];
+                  })
+                : [],
               gaps: Array.isArray(item.gaps) ? item.gaps : [],
               humanQuestions: Array.isArray(item.humanQuestions)
                 ? item.humanQuestions
                 : [],
-              supportedFindings: Array.isArray(item.supportedFindings)
-                ? item.supportedFindings
-                : [],
-              unverifiedFindings: Array.isArray(item.unverifiedFindings)
-                ? item.unverifiedFindings
-                : [],
+              supportedFindings: normalizeFindings(item.supportedFindings),
+              unverifiedFindings: normalizeFindings(item.unverifiedFindings),
             })) as RuleEvidenceAssessment[],
           }
         : result,
+    );
+  }
+
+  inspectR05Signage(
+    input: Parameters<AiProvider["inspectR05Signage"]>[0],
+  ): Promise<AiResult<R05SignageAssessment>> {
+    return this.ask<{
+      visible: boolean;
+      finding: string;
+      citations: unknown[];
+    }>(
+      "只检查所附 GV 项目图纸中是否清楚画出或说明充电车位的专用标识设计。不要评价数量、设备技术条件或整项是否通过。逐页寻找 Charging／EVSE 字样、充电图标、专用地面涂装或标牌；仅当图纸确实可见时返回 visible=true，并用简短中文描述实际看见的颜色、图标、文字或位置，注明这是图纸设计而非已施工事实。citations 每项必须严格使用 {materialVersionId,page}，填写图纸材料版本 ID 和实际原件页码；不要引用说明文本、规则原文或凭常识补充细节。仅有图例而没有车位落位时只能说图例/标识设计存在，不得声称实际车位已独立设置。看不清或没有可靠页码时返回 visible=false、finding 为空、citations 为空。返回 {visible,finding,citations}。",
+      {
+        ruleVersion: input.ruleVersion,
+        documents: asTextParts(input.visualParts),
+      },
+      (
+        value,
+      ): value is {
+        visible: boolean;
+        finding: string;
+        citations: unknown[];
+      } =>
+        isRecord(value) &&
+        typeof value.visible === "boolean" &&
+        typeof value.finding === "string" &&
+        Array.isArray(value.citations),
+      input.visualParts,
+    ).then((result) =>
+      result.ok
+        ? {
+            ...result,
+            value: {
+              visible: result.value.visible,
+              finding: result.value.finding,
+              citations: result.value.citations.flatMap((source) => {
+                if (!isRecord(source)) return [];
+                const materialVersionId =
+                  source.materialVersionId ?? source.material_version_id;
+                return typeof materialVersionId === "string" &&
+                  Number.isInteger(source.page)
+                  ? [{ materialVersionId, page: source.page as number }]
+                  : [];
+              }),
+            },
+          }
+        : result,
+    );
+  }
+
+  explainRuleGuidance(
+    input: Parameters<AiProvider["explainRuleGuidance"]>[0],
+  ): Promise<AiResult<RuleGuidanceSuggestion[]>> {
+    return this.ask<{ suggestions: RuleGuidanceSuggestion[] }>(
+      "你只解释给定的 LEED GV 官方原文片段对审核员待核问题提出的具体要求。每个建议必须对应输入的 ruleCode、questionIndex 和实际 chunkId；用简短中文说明可核对的阈值、条件或证据要求，不得将示例计算或其他项目数字当作通用阈值。材料尚未核实的内容只能表述为应核对，不能宣称本项目已符合。原文没有足够依据时跳过该问题，不得补充记忆中的规则，不得给出最终专业结论。返回 {suggestions:[{ruleCode,questionIndex,text,chunkId}]}。",
+      input,
+      (value): value is { suggestions: RuleGuidanceSuggestion[] } =>
+        isRecord(value) &&
+        Array.isArray(value.suggestions) &&
+        value.suggestions.every(
+          (item: unknown) =>
+            isRecord(item) &&
+            typeof item.ruleCode === "string" &&
+            Number.isInteger(item.questionIndex) &&
+            typeof item.text === "string" &&
+            typeof item.chunkId === "string",
+        ),
+    ).then((result) =>
+      result.ok ? { ...result, value: result.value.suggestions } : result,
     );
   }
 

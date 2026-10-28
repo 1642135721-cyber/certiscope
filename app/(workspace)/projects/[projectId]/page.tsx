@@ -91,7 +91,7 @@ export default async function ProjectPage({
       roundIds.length
         ? context.supabase
             .from("gv_processing_runs")
-            .select("round_id, status, created_at")
+            .select("round_id, status, created_at, cleared_at")
             .in("round_id", roundIds)
             .order("created_at", { ascending: false })
         : Promise.resolve({ data: [] }),
@@ -110,7 +110,10 @@ export default async function ProjectPage({
         : Promise.resolve({ data: [] }),
     ]);
   const roundById = new Map((rounds ?? []).map((round) => [round.id, round]));
-  const latestRunByRound = new Map<string, { status: string }>();
+  const latestRunByRound = new Map<
+    string,
+    { status: string; cleared_at: string | null }
+  >();
   for (const run of runs ?? [])
     if (!latestRunByRound.has(run.round_id))
       latestRunByRound.set(run.round_id, run);
@@ -144,7 +147,9 @@ export default async function ProjectPage({
       scopeHref: `/tasks/${task.id}#scope-confirmation`,
       materialHref: `/tasks/${task.id}/materials`,
       scopeConfirmed: Boolean(round?.scope_confirmed_at),
-      aiComplete: latestRunByRound.get(roundId)?.status === "complete",
+      aiComplete:
+        latestRunByRound.get(roundId)?.status === "complete" &&
+        !latestRunByRound.get(roundId)?.cleared_at,
       opinionSubmitted: opinionRoundIds.has(roundId),
       summaryConfirmed: latestSummaryByRound.get(roundId)?.confirmed === true,
       archived: Boolean(task.archived_at),

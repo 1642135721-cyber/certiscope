@@ -54,10 +54,12 @@ function displayDecision(saved: Decision | undefined) {
 export function ReviewWorkspace({
   taskId,
   projectName,
+  allowStoredRefresh,
   scopeConfirmed,
   incentivePath,
   facilityPath,
   canEdit,
+  canRerunSubmitted,
   files,
   fragments,
   decisions,
@@ -69,10 +71,12 @@ export function ReviewWorkspace({
   taskId: string;
   roundId: string;
   projectName: string;
+  allowStoredRefresh: boolean;
   scopeConfirmed: boolean;
   incentivePath: string | null;
   facilityPath: string | null;
   canEdit: boolean;
+  canRerunSubmitted: boolean;
   files: ReviewFile[];
   fragments: ReviewFragment[];
   decisions: Decision[];
@@ -80,6 +84,7 @@ export function ReviewWorkspace({
   run: {
     id: string;
     status: string;
+    model: string;
     errorMessage: string | null;
     createdAt: string;
     results: GvComputedResult[];
@@ -106,10 +111,13 @@ export function ReviewWorkspace({
   );
   const [busy, setBusy] = useState(false);
   const [assessing, setAssessing] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [assessingSeconds, setAssessingSeconds] = useState(0);
   const [runFeedback, setRunFeedback] = useState<{
     ok: boolean;
     message: string;
+    action: "run" | "clear" | "refresh";
   } | null>(null);
   const [message, setMessage] = useState("");
   useEffect(() => {
@@ -286,15 +294,79 @@ export function ReviewWorkspace({
         ok: boolean;
         message: string;
       };
-      setRunFeedback({ ok: result.ok, message: result.message });
+      setRunFeedback({ ok: result.ok, message: result.message, action: "run" });
       if (result.ok) router.refresh();
     } catch {
       setRunFeedback({
         ok: false,
         message: "审核未完成，请检查网络后重试，或依据原件人工核对。",
+        action: "run",
       });
     } finally {
       setAssessing(false);
+    }
+  }
+
+  async function refreshStoredAssessment() {
+    setRefreshing(true);
+    setRunFeedback(null);
+    try {
+      const response = await fetch(`/api/tasks/${taskId}/review/refresh`, {
+        method: "POST",
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message: string;
+      };
+      setRunFeedback({
+        ok: result.ok,
+        message: result.message,
+        action: "refresh",
+      });
+      if (result.ok) router.refresh();
+    } catch {
+      setRunFeedback({
+        ok: false,
+        message: "更新失败，请检查网络后重试。",
+        action: "refresh",
+      });
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function clearAssessment() {
+    if (
+      !run ||
+      !window.confirm(
+        "清除本轮 AI 初审的页面结果？原材料、历史运行记录和已保存的人工判断会保留。",
+      )
+    )
+      return;
+    setClearing(true);
+    setRunFeedback(null);
+    try {
+      const response = await fetch(`/api/tasks/${taskId}/review/clear`, {
+        method: "POST",
+      });
+      const result = (await response.json()) as {
+        ok: boolean;
+        message: string;
+      };
+      setRunFeedback({
+        ok: result.ok,
+        message: result.message,
+        action: "clear",
+      });
+      if (result.ok) router.refresh();
+    } catch {
+      setRunFeedback({
+        ok: false,
+        message: "清除失败，请检查网络后重试。",
+        action: "clear",
+      });
+    } finally {
+      setClearing(false);
     }
   }
 
@@ -447,26 +519,49 @@ export function ReviewWorkspace({
               {chosen.code} · {chosen.title}
             </h2>
             <div className="flex items-center gap-2">
-              {canEdit && (
+              {canEdit && run && (
                 <button
                   type="button"
-                  onClick={assess}
-                  disabled={assessing}
-                  className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold disabled:cursor-wait ${assessing ? "border-[#0b8055] bg-[#0b8055] text-white" : "border-[#2f9b6d] text-[#0c7950]"}`}
+                  onClick={clearAssessment}
+                  disabled={assessing || clearing || refreshing}
+                  className="rounded-full border border-[#c9d9cf] px-4 py-2 text-sm font-semibold text-[#557362] disabled:cursor-wait disabled:opacity-50"
                 >
-                  {assessing && (
-                    <LoaderCircle
-                      size={17}
-                      className="animate-spin"
-                      aria-hidden="true"
-                    />
-                  )}
-                  {assessing
-                    ? "正在审核…"
-                    : run
-                      ? "重新运行整轮初审"
-                      : "运行整轮 GV 初审"}
+                  {clearing ? "正在清除…" : "清除审核内容"}
                 </button>
+              )}
+              {canEdit && (
+                <div className="flex flex-col items-start gap-1">
+                  <button
+                    type="button"
+                    onClick={assess}
+                    disabled={assessing || clearing || refreshing}
+                    className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold disabled:cursor-wait ${assessing ? "border-[#0b8055] bg-[#0b8055] text-white" : "border-[#2f9b6d] text-[#0c7950]"}`}
+                  >
+                    {assessing && (
+                      <LoaderCircle
+                        size={17}
+                        className="animate-spin"
+                        aria-hidden="true"
+                      />
+                    )}
+                    {assessing
+                      ? "正在审核…"
+                      : run
+                        ? "重新运行整轮初审"
+                        : "运行整轮 GV 初审"}
+                  </button>
+                  {allowStoredRefresh && run && (
+                    <button
+                      type="button"
+                      onClick={refreshStoredAssessment}
+                      disabled={assessing || clearing || refreshing}
+                      className="rounded-full border border-[#c9d9cf] px-4 py-2 text-sm font-semibold text-[#557362] disabled:opacity-50"
+                      title="复用已保存的材料解析，重新执行字段提取、规则计算和千问审核；不重新读取 PDF 图像"
+                    >
+                      {refreshing ? "正在更新…" : "更新审核结论"}
+                    </button>
+                  )}
+                </div>
               )}
               <span
                 className={`rounded-full px-3 py-1 text-xs font-semibold ${assessing ? "bg-[#e4f5eb] text-[#0b8055]" : "bg-[#fff3e4] text-[#a77827]"}`}
@@ -505,7 +600,17 @@ export function ReviewWorkspace({
               role={runFeedback.ok ? "status" : "alert"}
               className={`border-t px-4 py-3 text-sm ${runFeedback.ok ? "bg-[#eef8f1] text-[#176f4a]" : "bg-[#fff3ea] text-[#9c563a]"}`}
             >
-              {runFeedback.ok ? "审核请求已完成：" : "审核未完成："}
+              {runFeedback.action === "clear"
+                ? runFeedback.ok
+                  ? "清除完成："
+                  : "清除失败："
+                : runFeedback.action === "refresh"
+                  ? runFeedback.ok
+                    ? "更新完成："
+                    : "更新失败："
+                  : runFeedback.ok
+                    ? "审核请求已完成："
+                    : "审核未完成："}
               {runFeedback.message}
             </div>
           )}
@@ -515,9 +620,11 @@ export function ReviewWorkspace({
             >
               {stale
                 ? "人工事实已有更新，当前计算已过期，请重新运行整轮初审。"
-                : run.status === "partial"
-                  ? `部分步骤未完成：${run.errorMessage ?? "请人工核对"}`
-                  : `整轮初审已保存 · ${new Date(run.createdAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`}
+                : run.model === "none"
+                  ? `存储字段更新已保存 · ${new Date(run.createdAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`
+                  : run.status === "partial"
+                    ? `部分步骤未完成：${run.errorMessage ?? "请人工核对"}`
+                    : `整轮初审已保存 · ${new Date(run.createdAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`}
             </div>
           )}
           {run && files.some((file) => file.parseStatus !== "extracted") && (
@@ -687,8 +794,39 @@ export function ReviewWorkspace({
                     : "保存并进入意见"}{" "}
                   <ArrowRight size={15} className="inline" />
                 </button>
+                {canRerunSubmitted && run && (
+                  <div className="flex flex-col items-start gap-1">
+                    <button
+                      type="button"
+                      onClick={assess}
+                      disabled={assessing}
+                      className="inline-flex items-center gap-2 rounded-lg border border-[#d6e4da] px-3 py-2 text-xs font-semibold text-[#577766] disabled:opacity-50"
+                    >
+                      {assessing && (
+                        <LoaderCircle size={14} className="animate-spin" />
+                      )}
+                      {assessing ? "正在重新审核…" : "重新运行 AI 初审"}
+                    </button>
+                    {allowStoredRefresh && (
+                      <button
+                        type="button"
+                        onClick={refreshStoredAssessment}
+                        disabled={assessing || refreshing}
+                        className="rounded-lg border border-[#d6e4da] px-3 py-2 text-xs font-semibold text-[#577766] disabled:opacity-50"
+                        title="复用已保存的材料解析，重新执行字段提取、规则计算和千问审核；不重新读取 PDF 图像"
+                      >
+                        {refreshing ? "正在更新…" : "更新审核结论"}
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
+            {canRerunSubmitted && (
+              <p className="text-xs text-[#82958a]">
+                重新审核只更新 AI 候选结果，已提交的专业意见不会自动改变。
+              </p>
+            )}
             <div>
               {message ? (
                 <output className="text-sm text-[#976a35]">{message}</output>

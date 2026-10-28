@@ -20,6 +20,7 @@ import {
   hasMaterialConflict,
   refineSemanticFindings,
 } from "@/lib/gv/semantic-findings";
+import { dedupeRuleSupport } from "@/lib/gv/support-reconciliation";
 import type { SourceLocation } from "@/lib/gv/types";
 import { MaterialOpen } from "../materials/material-actions";
 
@@ -50,7 +51,11 @@ export type ReviewAssessment = {
   provider: string;
   model: string;
   created_at: string;
-  supported_findings?: { text: string; citations: SourceLocation[] }[];
+  supported_findings?: {
+    text: string;
+    citations: SourceLocation[];
+    sourceStatements?: string[];
+  }[];
   unverified_findings?: { text: string; citations: SourceLocation[] }[];
 };
 const emptySources: SourceLocation[] = [];
@@ -189,7 +194,13 @@ function conciseReviewerFindings(
             ? "r06-dr"
             : ruleCode === "R06" && /型号|采用|设备清单/.test(finding.text)
               ? "r06-model"
-              : finding.text.replace(/[\s，。；、]/g, "").slice(0, 28);
+              : ruleCode === "R06" &&
+                  /联网|网络|IP.可寻址|IP.addressable/.test(finding.text)
+                ? "r06-network"
+                : ruleCode === "R06" &&
+                    /连接器|Type\s*2|IEC\s*62196/.test(finding.text)
+                  ? "r06-connector"
+                  : finding.text.replace(/[\s，。；、]/g, "").slice(0, 28);
     const previous = grouped.get(key);
     if (previous) {
       previous.citations = [...previous.citations, ...finding.citations].filter(
@@ -211,7 +222,7 @@ function conciseReviewerFindings(
       first.text =
         "分区优先车位数在材料中有差异；按保守数字计算仍达到数量下限。请核对最终分区数量和位号。";
   }
-  return concise.slice(0, 3);
+  return concise.slice(0, ruleCode === "R06" ? 4 : 3);
 }
 
 function reviewerQuestion(
@@ -272,7 +283,7 @@ function findingIsAboutRule(ruleCode: string, text: string) {
     R02: /绿色车辆|车辆资格|车型|ACEEE|green vehicle|vehicle eligib|qualified vehicle|vehicle rating/i,
     R03: /优先车位|优先停车|B2|preferred parking|停车入口|35个|35 个|5%/i,
     R04: /优惠|折扣|费率|discount|parking rate|20%/i,
-    R05: /充电车位|充电专用|充电设施|EVSE|charging space|2%|14个|14 个/i,
+    R05: /充电车位|充电.{0,8}(?:车位|标识)|充电专用|充电设施|EVSE|charging.{0,16}(?:space|车位|标识)|2%|14个|14 个/i,
     R06: /设备|型号|电压|插座|充电等级|联网|连接器|需求响应|分时电价|Level 2|Type 2|\bDR\b|\bTOU\b|charger|equipment|voltage|socket/i,
     R07: /替代设施|替代燃料|每日服务|服务能力|alternative.fuel|daily service/i,
   };
@@ -484,8 +495,11 @@ export function ReviewEvidenceTriad({
       : (focusedFragment?.page ?? citations[0]?.page ?? retrieved[0]?.page);
   const ruleMark = ruleMarks[rule.code];
   const supported = supportedPoints(rule.code, result);
-  const allSupportedFindings = (assessment?.supported_findings ?? []).filter(
-    (finding) => findingIsAboutRule(rule.code, finding.text),
+  const allSupportedFindings = dedupeRuleSupport(
+    rule.code,
+    (assessment?.supported_findings ?? []).filter((finding) =>
+      findingIsAboutRule(rule.code, finding.text),
+    ),
   );
   const { supported: supportedFindings, unverified: rawUnverifiedFindings } =
     refineSemanticFindings(
@@ -494,6 +508,7 @@ export function ReviewEvidenceTriad({
       (assessment?.unverified_findings ?? []).filter((finding) =>
         findingIsAboutRule(rule.code, finding.text),
       ),
+      result,
     );
   const rawConciseFindings = conciseReviewerFindings(
     rule.code,
@@ -743,6 +758,22 @@ export function ReviewEvidenceTriad({
                 className="mt-2 rounded-lg bg-[#f1f8f3] p-2 text-sm leading-6"
               >
                 <p>AI 判断有材料支持 · {readable(finding.text)}</p>
+                {(finding.sourceStatements?.length ?? 0) > 1 ? (
+                  <details className="mt-1 text-xs text-[#527265]">
+                    <summary className="cursor-pointer">
+                      查看合并前的 {finding.sourceStatements?.length} 条原始表述
+                    </summary>
+                    <ul className="mt-1 list-disc space-y-1 pl-4">
+                      {finding.sourceStatements?.map(
+                        (statement, sourceIndex) => (
+                          <li key={`${sourceIndex}-${statement}`}>
+                            {statement}
+                          </li>
+                        ),
+                      )}
+                    </ul>
+                  </details>
+                ) : null}
                 <SourceCitationButtons
                   sources={finding.citations}
                   files={files}
@@ -847,6 +878,55 @@ export function ReviewEvidenceTriad({
                   ))}
                 </ul>
               </details>
+            )}
+            {result?.ruleGuidanceStatus && (
+              <section className="mt-4 border-t border-[#dce8df] pt-3">
+                <h4 className="text-sm font-bold text-[#126946]">
+                  LEED 规则核对要点
+                </h4>
+                <p className="mt-1 text-xs leading-5 text-[#718579]">
+                  根据待核问题从受控 GV 原文补充检索并整理，供核对材料使用。
+                </p>
+                {result.ruleGuidance?.length ? (
+                  <div className="mt-2 space-y-2">
+                    {result.ruleGuidance.map((guidance) => (
+                      <div
+                        key={`${guidance.chunkId}-${guidance.questionIndex}`}
+                        className="rounded-lg bg-[#f1f8f3] p-2 text-sm leading-6"
+                      >
+                        <p>{guidance.text}</p>
+                        <a
+                          href={`/rules/gv-source.pdf#page=${guidance.page}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-1 inline-block text-xs font-semibold text-[#0b8255]"
+                        >
+                          补充检索所得 · {guidance.clause} · 官方原文第{" "}
+                          {guidance.page} 页 ↗
+                        </a>
+                        <details className="mt-1 text-xs text-[#718579]">
+                          <summary className="cursor-pointer">
+                            查看检索来源
+                          </summary>
+                          <p>
+                            来源：{guidance.sourceId} · {guidance.sourceVersion}
+                          </p>
+                          <p>
+                            规则包：{guidance.rulePackageVersion} · 分块：
+                            {guidance.chunkId}
+                          </p>
+                        </details>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-xs leading-5 text-[#986934]">
+                    {result.ruleGuidanceStatus === "FAILED"
+                      ? "本次补充解释未生成，请直接核对右侧规则原文。"
+                      : "没有找到足以解释待核问题的可靠规则片段，请核对右侧规则原文。"}
+                  </p>
+                )}
+              </section>
             )}
             <p className="mt-4 border-t pt-3 text-xs leading-5 text-[#718579]">
               AI 仅给出证据支持程度，最终是否符合由审核员核对原件后决定。

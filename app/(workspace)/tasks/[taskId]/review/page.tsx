@@ -48,7 +48,7 @@ export default async function ReviewPage({
     context.supabase
       .from("task_rounds")
       .select(
-        "id, sequence, status, scope_confirmed_at, selected_material_version_ids",
+        "id, sequence, status, scope_confirmed_at, selected_material_version_ids, display_gv_run_id, display_gv_run_selected_at",
       )
       .eq("id", context.task.current_round_id ?? "")
       .maybeSingle(),
@@ -77,7 +77,7 @@ export default async function ReviewPage({
     context.supabase
       .from("gv_processing_runs")
       .select(
-        "id, scope_confirmed_at, status, error_message, results, created_at, provider, model",
+        "id, scope_confirmed_at, status, error_message, results, created_at, provider, model, cleared_at",
       )
       .eq("round_id", context.task.current_round_id ?? "")
       .order("created_at", { ascending: false })
@@ -129,21 +129,47 @@ export default async function ReviewPage({
     (assessment) => assessment.scope_confirmed_at === round?.scope_confirmed_at,
   );
   const latestRun = runs?.[0];
+  const selectedRun =
+    round?.display_gv_run_id &&
+    round.display_gv_run_selected_at &&
+    (!latestRun || latestRun.created_at <= round.display_gv_run_selected_at)
+      ? (
+          await context.supabase
+            .from("gv_processing_runs")
+            .select(
+              "id, scope_confirmed_at, status, error_message, results, created_at, provider, model, cleared_at",
+            )
+            .eq("id", round.display_gv_run_id)
+            .eq("round_id", round.id)
+            .maybeSingle()
+        ).data
+      : null;
+  const displayedRun =
+    selectedRun?.scope_confirmed_at === round?.scope_confirmed_at &&
+    !selectedRun?.cleared_at
+      ? selectedRun
+      : latestRun;
   const run =
-    latestRun?.scope_confirmed_at === round?.scope_confirmed_at
-      ? latestRun
+    displayedRun?.scope_confirmed_at === round?.scope_confirmed_at &&
+    !displayedRun?.cleared_at
+      ? displayedRun
       : null;
   const currentConfirmations = (
     (confirmations ?? []) as NumericConfirmation[]
   ).filter((item) => item.created_at >= (round?.scope_confirmed_at ?? ""));
   const runResults = (
-    Array.isArray(run?.results) ? run.results : []
-  ) as GvComputedResult[];
+    (Array.isArray(run?.results) ? run.results : []) as GvComputedResult[]
+  ).map((result) =>
+    process.env.GV_RULE_GUIDANCE_RAG_ENABLED === "false"
+      ? { ...result, ruleGuidance: undefined, ruleGuidanceStatus: undefined }
+      : result,
+  );
   const runAssessments = runResults.map((item) => {
     const { supported, unverified } = refineSemanticFindings(
       item.ruleId,
       item.supportedFindings ?? [],
       item.unverifiedFindings ?? [],
+      item,
     );
     return {
       id: `${run!.id}-${item.ruleId}`,
@@ -178,12 +204,22 @@ export default async function ReviewPage({
         taskId={taskId}
         roundId={round?.id ?? ""}
         projectName={project?.name ?? "项目"}
+        allowStoredRefresh={
+          context.task.project_id === "00000000-0000-0000-0000-000000000000"
+        }
         scopeConfirmed={Boolean(round?.scope_confirmed_at)}
         incentivePath={context.task.incentive_path}
         facilityPath={context.task.facility_path}
         canEdit={Boolean(
           round &&
             ["open", "returned"].includes(round.status) &&
+            context.actor.role === "auditor" &&
+            context.actor.id === context.task.current_auditor_id &&
+            !context.readonly &&
+            !context.task.archived_at,
+        )}
+        canRerunSubmitted={Boolean(
+          round?.status === "submitted" &&
             context.actor.role === "auditor" &&
             context.actor.id === context.task.current_auditor_id &&
             !context.readonly &&
@@ -207,12 +243,15 @@ export default async function ReviewPage({
           };
         })}
         decisions={currentDecisions}
-        assessments={run ? runAssessments : currentAssessments}
+        assessments={
+          run ? runAssessments : latestRun?.cleared_at ? [] : currentAssessments
+        }
         run={
           run
             ? {
                 id: run.id,
                 status: run.status,
+                model: run.model,
                 errorMessage: run.error_message,
                 createdAt: run.created_at,
                 results: runResults,

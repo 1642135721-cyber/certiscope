@@ -2,11 +2,16 @@ import { NextResponse } from "next/server";
 import type { LocatedContent, RuleEvidenceAssessment } from "@/lib/ai/provider";
 import { aiProvider } from "@/lib/ai/qwen";
 import { imageVisionContent } from "@/lib/documents/parse-image";
+import { cropVisualPdf } from "@/lib/documents/visual-pdf-pages";
 import { actionStatus, failure, success } from "@/lib/gv/action-result";
 import { retrieveGvBasis } from "@/lib/gv/basis-retrieval";
-import { conditionCandidateCoverage } from "@/lib/gv/condition-catalog";
+import {
+  conditionCandidateCoverage,
+  gvConditionFields,
+} from "@/lib/gv/condition-catalog";
 import {
   citationWasRetrieved,
+  type FieldEvidenceAnchor,
   retrievedSource,
   retrieveGvEvidence,
   retrieveGvRuleEvidence,
@@ -23,9 +28,24 @@ import {
   gvEvidenceFields,
   validGvEvidenceCandidate,
 } from "@/lib/gv/field-catalog";
+import {
+  retrieveGvGuidanceChunks,
+  validateGvGuidance,
+} from "@/lib/gv/knowledge/gv-guidance";
+import { isScopedNumericCandidate } from "@/lib/gv/numeric-candidate-scope";
+import {
+  type ParkingDrawingNumberRun,
+  readParkingDrawingNumbers,
+} from "@/lib/gv/parking-drawing-numbers";
+import {
+  hasCitedR05Signage,
+  mergeVerifiedR05Signage,
+  verifiedR05SignageFinding,
+} from "@/lib/gv/r05-signage";
 import { gvRules, ruleApplies } from "@/lib/gv/rule-catalog";
 import {
   evaluateGvRules,
+  type GvComputedResult,
   type NumericCandidate,
   type NumericConfirmation,
   numericFields,
@@ -36,18 +56,35 @@ import {
   calibrateCandidateSupport,
   refineSemanticFindings,
 } from "@/lib/gv/semantic-findings";
+import {
+  dedupeRuleSupport,
+  mergeAdditionalSupport,
+} from "@/lib/gv/support-reconciliation";
 import type { SourceLocation } from "@/lib/gv/types";
 import { AuthorizationError, requireTaskAccess } from "@/lib/supabase/auth";
 
 export const maxDuration = 300;
 
 export async function POST(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ taskId: string }> },
 ) {
   try {
     const { taskId } = await params;
     const { supabase, actor, task } = await requireTaskAccess(taskId, true);
+    const reuseParsedMaterials =
+      (
+        (await request.json().catch(() => null)) as {
+          reuseParsedMaterials?: boolean;
+        } | null
+      )?.reuseParsedMaterials === true;
+    if (
+      reuseParsedMaterials &&
+      task.project_id !== "00000000-0000-0000-0000-000000000000"
+    ) {
+      const result = failure("FORBIDDEN", "该测试入口仅用于指定的 GV 项目。");
+      return NextResponse.json(result, { status: actionStatus(result) });
+    }
     if (actor.role !== "auditor" || task.current_auditor_id !== actor.id) {
       const result = failure("FORBIDDEN", "仅当前审核员可发起 GV 初审。");
       return NextResponse.json(result, { status: actionStatus(result) });
@@ -62,7 +99,7 @@ export async function POST(
     if (roundError) throw roundError;
     if (
       !round?.scope_confirmed_at ||
-      !["open", "returned"].includes(round.status)
+      !["open", "returned", "submitted"].includes(round.status)
     ) {
       const result = failure(
         "CONFLICT",
@@ -96,6 +133,44 @@ export async function POST(
       const result = failure("VALIDATION", "本轮没有已确认的材料版本。");
       return NextResponse.json(result, { status: actionStatus(result) });
     }
+    const { data: cachedRun, error: cachedRunError } = reuseParsedMaterials
+      ? await supabase
+          .from("gv_processing_runs")
+          .select(
+            "results, scope_confirmed_at, selected_material_version_ids, rule_version_id",
+          )
+          .eq("task_id", taskId)
+          .eq("round_id", round.id)
+          .is("cleared_at", null)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle()
+      : { data: null, error: null };
+    if (cachedRunError) throw cachedRunError;
+    if (
+      reuseParsedMaterials &&
+      (!cachedRun ||
+        !Array.isArray(cachedRun.results) ||
+        cachedRun.scope_confirmed_at !== round.scope_confirmed_at ||
+        cachedRun.rule_version_id !== round.rule_version_id ||
+        JSON.stringify([...ids].sort()) !==
+          JSON.stringify(
+            [...(cachedRun.selected_material_version_ids ?? [])].sort(),
+          ))
+    ) {
+      const result = failure(
+        "CONFLICT",
+        "没有可复用的同范围材料解析结果，请使用完整重新审核。",
+      );
+      return NextResponse.json(result, { status: actionStatus(result) });
+    }
+    // Opt in only after comparing real GV results with the legacy selection.
+    const fieldAnchoredEvidence =
+      process.env.GV_FIELD_ANCHORED_EVIDENCE === "true";
+    const fragmentQuery = supabase
+      .from("parsed_fragments")
+      .select("material_version_id, text_content, source_location, status")
+      .in("material_version_id", ids);
     const [
       { data: versions, error: fileError },
       { data: fragments, error: fragmentError },
@@ -110,12 +185,12 @@ export async function POST(
         .in("id", ids)
         .is("removed_at", null)
         .eq("round_id", round.id),
-      supabase
-        .from("parsed_fragments")
-        .select("material_version_id, text_content, source_location, status")
-        .in("material_version_id", ids)
-        .order("sequence")
-        .limit(180),
+      fieldAnchoredEvidence
+        ? fragmentQuery
+            .order("material_version_id")
+            .order("sequence")
+            .limit(1000)
+        : fragmentQuery.order("sequence").limit(180),
       supabase
         .from("fact_candidates")
         .select(
@@ -153,9 +228,11 @@ export async function POST(
       }[],
       applicableRules.map((rule) => rule.code),
       ids,
+      fieldAnchoredEvidence ? 18000 : 12000,
+      fieldAnchoredEvidence,
     );
     const imageParts: LocatedContent[] = [];
-    for (const file of (versions ?? [])
+    for (const file of (reuseParsedMaterials ? [] : (versions ?? []))
       .filter(
         (item) =>
           ["jpg", "jpeg", "png"].includes(item.extension) &&
@@ -176,9 +253,40 @@ export async function POST(
     }
     evidenceParts.push(...imageParts);
     const errors: string[] = [];
+    const drawingNumberRuns: ParkingDrawingNumberRun[] = [];
+    if (!reuseParsedMaterials) {
+      for (const file of (versions ?? [])
+        .filter(
+          (item) =>
+            item.extension === "pdf" &&
+            item.byte_size <= 20 * 1024 * 1024 &&
+            /site|总平|场地/i.test(item.file_name),
+        )
+        .slice(0, 3)) {
+        const { data, error } = await supabase.storage
+          .from("gv-materials")
+          .download(file.storage_path);
+        if (error || !data) {
+          errors.push(`图纸编号核对：${file.file_name} 读取失败，请查看原件`);
+          continue;
+        }
+        try {
+          drawingNumberRuns.push(
+            ...(await readParkingDrawingNumbers(
+              new Uint8Array(await data.arrayBuffer()),
+              file.id,
+            )),
+          );
+        } catch {
+          errors.push(
+            `图纸编号核对：${file.file_name} 无法自动读取编号，请查看原件`,
+          );
+        }
+      }
+    }
     const pdfParts: LocatedContent[] = [];
     const visualPageCounts = new Map<string, number>();
-    const visualPdfs = (versions ?? [])
+    const visualPdfs = (reuseParsedMaterials ? [] : (versions ?? []))
       .filter((file) => {
         if (
           file.extension !== "pdf" ||
@@ -267,28 +375,34 @@ export async function POST(
       return true;
     });
     if (patterned.length) {
-      const { data: added, error } = await supabase
-        .from("fact_candidates")
-        .insert(
-          patterned.map((item) => ({
-            task_id: taskId,
-            round_id: round.id,
-            material_version_id: item.source.materialVersionId,
-            field_key: item.key,
-            candidate_value: item.value,
-            unit: "车位",
-            scope: item.scope,
-            source_location: item.source,
-            confidence: null,
-            extraction_method: "pattern:direct_statement",
-            state: "candidate",
-          })),
-        )
-        .select(
-          "id, field_key, candidate_value, unit, source_location, material_version_id",
-        );
-      if (error) throw error;
-      candidates = [...candidates, ...((added ?? []) as NumericCandidate[])];
+      const rows = patterned.map((item) => ({
+        task_id: taskId,
+        round_id: round.id,
+        material_version_id: item.source.materialVersionId,
+        field_key: item.key,
+        candidate_value: item.value,
+        unit: "车位",
+        scope: item.scope,
+        source_location: item.source,
+        confidence: null,
+        extraction_method: "pattern:direct_statement",
+        state: "candidate",
+      }));
+      if (round.status === "submitted" || reuseParsedMaterials) {
+        candidates = [
+          ...candidates,
+          ...rows.map((item) => ({ ...item, id: crypto.randomUUID() })),
+        ];
+      } else {
+        const { data: added, error } = await supabase
+          .from("fact_candidates")
+          .insert(rows)
+          .select(
+            "id, field_key, candidate_value, unit, source_location, material_version_id",
+          );
+        if (error) throw error;
+        candidates = [...candidates, ...((added ?? []) as NumericCandidate[])];
+      }
     }
     const extracted = evidenceParts.length
       ? await aiProvider.extractCandidates({
@@ -323,6 +437,7 @@ export async function POST(
           );
           return (
             (isNumeric || validGvEvidenceCandidate(item)) &&
+            isScopedNumericCandidate(item, direct, fieldAnchoredEvidence) &&
             ids.includes(item.source?.materialVersionId) &&
             citationWasRetrieved(item.source, evidenceParts) &&
             (!isNumeric ||
@@ -347,28 +462,37 @@ export async function POST(
         return true;
       });
       if (fresh.length) {
-        const { data: added, error } = await supabase
-          .from("fact_candidates")
-          .insert(
-            fresh.map((item) => ({
-              task_id: taskId,
-              round_id: round.id,
-              material_version_id: item.source.materialVersionId,
-              field_key: item.key,
-              candidate_value: item.value,
-              unit: item.unit ?? null,
-              scope: item.scope ?? null,
-              source_location: retrievedSource(item.source, evidenceParts),
-              confidence: item.confidence ?? null,
-              extraction_method: `qwen:${extracted.model}`,
-              state: "candidate",
-            })),
-          )
-          .select(
-            "id, field_key, candidate_value, unit, source_location, material_version_id",
-          );
-        if (error) throw error;
-        candidates = [...candidates, ...((added ?? []) as NumericCandidate[])];
+        const rows = fresh.map((item) => ({
+          task_id: taskId,
+          round_id: round.id,
+          material_version_id: item.source.materialVersionId,
+          field_key: item.key,
+          candidate_value: item.value,
+          unit: item.unit ?? null,
+          scope: item.scope ?? null,
+          source_location: retrievedSource(item.source, evidenceParts),
+          confidence: item.confidence ?? null,
+          extraction_method: `qwen:${extracted.model}`,
+          state: "candidate",
+        }));
+        if (round.status === "submitted" || reuseParsedMaterials) {
+          candidates = [
+            ...candidates,
+            ...rows.map((item) => ({ ...item, id: crypto.randomUUID() })),
+          ];
+        } else {
+          const { data: added, error } = await supabase
+            .from("fact_candidates")
+            .insert(rows)
+            .select(
+              "id, field_key, candidate_value, unit, source_location, material_version_id",
+            );
+          if (error) throw error;
+          candidates = [
+            ...candidates,
+            ...((added ?? []) as NumericCandidate[]),
+          ];
+        }
       }
     } else if (extracted) errors.push(`事实抽取：${extracted.message}`);
 
@@ -422,6 +546,53 @@ export async function POST(
         ],
       };
     });
+    if (reuseParsedMaterials && cachedRun) {
+      const priorResults = cachedRun.results as GvComputedResult[];
+      const changed = calculated.filter((item) => {
+        const prior = priorResults.find((old) => old.ruleId === item.ruleId);
+        return (
+          !prior || JSON.stringify(prior.inputs) !== JSON.stringify(item.inputs)
+        );
+      });
+      if (changed.length) {
+        const result = failure(
+          "CONFLICT",
+          `${changed.map((item) => item.ruleId).join("、")} 的数值字段与现有初审不同，未覆盖当前结论。请核对字段或使用完整重新审核。`,
+        );
+        return NextResponse.json(result, { status: actionStatus(result) });
+      }
+    }
+    if (fieldAnchoredEvidence) {
+      candidates.sort((a, b) => {
+        const left = `${a.field_key}:${sourceKey(a.source_location)}:${String(a.candidate_value)}`;
+        const right = `${b.field_key}:${sourceKey(b.source_location)}:${String(b.candidate_value)}`;
+        return left < right ? -1 : left > right ? 1 : 0;
+      });
+    }
+    const fieldAnchors = fieldAnchoredEvidence
+      ? new Map(
+          applicableRules.map((rule) => {
+            const fieldKeys = new Set<string>(
+              gvConditionFields
+                .filter((condition) => condition.rule === rule.code)
+                .flatMap((condition) => condition.fields),
+            );
+            const anchors: FieldEvidenceAnchor[] = candidates.flatMap(
+              (candidate) =>
+                fieldKeys.has(candidate.field_key) && candidate.source_location
+                  ? [
+                      {
+                        fieldKey: candidate.field_key,
+                        source: candidate.source_location,
+                        value: candidate.candidate_value,
+                      },
+                    ]
+                  : [],
+            );
+            return [rule.code, anchors] as const;
+          }),
+        )
+      : undefined;
     const ruleEvidence = retrieveGvRuleEvidence(
       (fragments ?? []) as {
         material_version_id: string;
@@ -431,6 +602,8 @@ export async function POST(
       }[],
       applicableRules.map((rule) => rule.code),
       ids,
+      3200,
+      fieldAnchors,
     );
     const visualPartsFor = (
       code: (typeof applicableRules)[number]["code"],
@@ -445,8 +618,55 @@ export async function POST(
           })
         : [];
     const expandedVisualParts = new Map<string, LocatedContent[]>();
+    const carriedEvidenceParts = new Map<string, LocatedContent[]>();
+    const reusableFindings = new Map<
+      string,
+      NonNullable<GvComputedResult["supportedFindings"]>
+    >();
+    if (reuseParsedMaterials && cachedRun) {
+      for (const prior of cachedRun.results as GvComputedResult[]) {
+        const updated = calculated.find((item) => item.ruleId === prior.ruleId);
+        if (
+          !updated ||
+          JSON.stringify(updated.inputs) !== JSON.stringify(prior.inputs)
+        ) {
+          errors.push(
+            `${prior.ruleId} 数值字段已变化，旧视觉支持事实不沿用，请核对原件。`,
+          );
+          continue;
+        }
+        const findings = (prior.supportedFindings ?? []).filter(
+          (finding) =>
+            finding.citations.length > 0 &&
+            finding.citations.every((source) =>
+              ids.includes(source.materialVersionId),
+            ),
+        );
+        if (!findings.length) continue;
+        reusableFindings.set(prior.ruleId, findings);
+        carriedEvidenceParts.set(
+          prior.ruleId,
+          findings.flatMap((finding) =>
+            finding.citations.map((source) => ({
+              text: `上一轮已保存的带原件定位的支持事实（需按原件核对）：${finding.text}`,
+              source: {
+                ...source,
+                note: "复用上轮已引用事实；本次未重读图像，请核对原件",
+              },
+            })),
+          ),
+        );
+      }
+    }
     const evidenceFor = (code: (typeof applicableRules)[number]["code"]) => [
       ...(ruleEvidence.get(code) ?? []),
+      ...(carriedEvidenceParts.get(code) ?? []),
+      ...(code === "R01"
+        ? drawingNumberRuns.map((run) => ({
+            text: `场地停车图纸的独立数字位号由 1 编至 ${run.last}，文字坐标直接读到 ${run.readCount} 个；${run.missing.length ? `${run.missing.join("、")} 号未从文字层读出，须对照原图。` : "编号无缺口。"}这是地面车位数量线索，仍须核对统计边界和重复计数。`,
+            source: run.source,
+          }))
+        : []),
       ...imageParts,
       ...(expandedVisualParts.get(code) ?? visualPartsFor(code, pdfParts)),
     ];
@@ -671,8 +891,238 @@ export async function POST(
           }
         }
       }
+      const supportQuestions = semanticQuestions.flatMap((question) => {
+        const existing = semanticResults.get(question.ruleCode);
+        const textParts = question.evidenceParts.filter((part) =>
+          Boolean(part.text?.trim()),
+        );
+        if (!existing || !textParts.length) return [];
+        return [
+          {
+            ...question,
+            question: `${question.question}\n本次只补查首轮可能遗漏的、与本规则不同子条件有关的材料直接事实。首轮已列支持事实：${existing.supportedFindings.map((item) => item.text).join("；") || "无"}。不得重复这些事实；有可定位材料页码才写 supportedFindings。本次只有文字片段，不能宣称已经看见图纸图像。已见手册能力不能推断项目实际安装、联网或启用。数量、图纸标识、空间独立性分别处理，未证实的条件继续保留。`,
+            evidenceParts: textParts,
+          },
+        ];
+      });
+      const supportBatches = Array.from(
+        { length: Math.ceil(supportQuestions.length / 2) },
+        (_, index) => supportQuestions.slice(index * 2, index * 2 + 2),
+      );
+      const supportResults = await Promise.all(
+        supportBatches.map((questions) =>
+          aiProvider.checkRules({
+            taskId,
+            roundId: round.id,
+            ruleVersion: rulePackage.package_version,
+            questions,
+          }),
+        ),
+      );
+      for (const [index, extra] of supportResults.entries()) {
+        if (!extra.ok) continue;
+        usage.inputTokens += extra.usage.inputTokens;
+        usage.outputTokens += extra.usage.outputTokens;
+        for (const item of extra.value) {
+          const question = supportBatches[index].find(
+            (entry) => entry.ruleCode === item.ruleCode,
+          );
+          const existing = semanticResults.get(item.ruleCode);
+          if (!question || !existing) continue;
+          semanticResults.set(item.ruleCode, {
+            ...existing,
+            supportedFindings: mergeAdditionalSupport(
+              item.ruleCode,
+              existing.supportedFindings,
+              item.supportedFindings,
+              question.evidenceParts,
+            ),
+          });
+        }
+      }
+      if (reuseParsedMaterials && cachedRun) {
+        for (const [ruleCode, retained] of reusableFindings) {
+          const current = semanticResults.get(ruleCode);
+          const prior = (cachedRun.results as GvComputedResult[]).find(
+            (item) => item.ruleId === ruleCode,
+          );
+          const combined = [...retained, ...(current?.supportedFindings ?? [])];
+          const seen = new Set<string>();
+          const unique = combined.filter((finding) => {
+            const key = `${finding.text.trim().toLowerCase()}:${finding.citations
+              .map(
+                (source) => `${source.materialVersionId}:${source.page ?? ""}`,
+              )
+              .sort()
+              .join(",")}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+          semanticResults.set(ruleCode, {
+            ruleCode,
+            support: current?.support ?? prior?.semanticSupport ?? "partial",
+            citations: [
+              ...(current?.citations ?? []),
+              ...retained.flatMap((finding) => finding.citations),
+            ],
+            gaps: current?.gaps ?? [],
+            humanQuestions: current?.humanQuestions ?? [],
+            unverifiedFindings: [
+              ...(prior?.unverifiedFindings ?? []),
+              ...(current?.unverifiedFindings ?? []),
+            ].filter(
+              (finding, index, all) =>
+                all.findIndex(
+                  (item) => item.text.trim() === finding.text.trim(),
+                ) === index,
+            ),
+            supportedFindings: dedupeRuleSupport(ruleCode, unique),
+          });
+        }
+      }
+      if (
+        !reuseParsedMaterials &&
+        task.project_id === "00000000-0000-0000-0000-000000000000"
+      ) {
+        const { data: priorRun } = await supabase
+          .from("gv_processing_runs")
+          .select("results, scope_confirmed_at, selected_material_version_ids")
+          .eq("task_id", taskId)
+          .eq("round_id", round.id)
+          .is("cleared_at", null)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (
+          priorRun &&
+          priorRun.scope_confirmed_at === round.scope_confirmed_at &&
+          JSON.stringify(
+            [...(priorRun.selected_material_version_ids ?? [])].sort(),
+          ) === JSON.stringify([...ids].sort())
+        ) {
+          const previousR06 = (
+            (Array.isArray(priorRun.results)
+              ? priorRun.results
+              : []) as GvComputedResult[]
+          ).find((item) => item.ruleId === "R06");
+          const retained = (previousR06?.supportedFindings ?? []).filter(
+            (finding) =>
+              finding.citations.length > 0 &&
+              finding.citations.every((source) =>
+                ids.includes(source.materialVersionId),
+              ),
+          );
+          if (retained.length) {
+            carriedEvidenceParts.set(
+              "R06",
+              retained.flatMap((finding) =>
+                finding.citations.map((source) => ({
+                  text: finding.text,
+                  source,
+                })),
+              ),
+            );
+            const current = semanticResults.get("R06");
+            semanticResults.set("R06", {
+              ruleCode: "R06",
+              support:
+                current?.support === "supports" &&
+                (previousR06?.unverifiedFindings?.length ?? 0) > 0
+                  ? "partial"
+                  : (current?.support ?? "partial"),
+              citations:
+                current?.citations ??
+                retained.flatMap((finding) => finding.citations),
+              gaps: current?.gaps ?? previousR06?.issues ?? [],
+              humanQuestions:
+                current?.humanQuestions ?? previousR06?.humanQuestions ?? [],
+              unverifiedFindings: [
+                ...(previousR06?.unverifiedFindings ?? []),
+                ...(current?.unverifiedFindings ?? []),
+              ].filter(
+                (finding, index, all) =>
+                  all.findIndex(
+                    (item) => item.text.trim() === finding.text.trim(),
+                  ) === index,
+              ),
+              supportedFindings: dedupeRuleSupport("R06", [
+                ...retained,
+                ...(current?.supportedFindings ?? []),
+              ]),
+            });
+          }
+        }
+      }
+      const r05Assessment = semanticResults.get("R05");
+      const r05VisualParts = visualPartsFor("R05", pdfParts);
+      const signageParts = r05VisualParts.filter((part) =>
+        /sign|标识|标牌/i.test(part.pdfFileName ?? ""),
+      );
+      const focusedSignageParts = signageParts.length
+        ? signageParts
+        : r05VisualParts;
+      if (
+        r05Assessment &&
+        focusedSignageParts.length &&
+        !hasCitedR05Signage(r05Assessment.supportedFindings, r05VisualParts)
+      ) {
+        const primarySignage = focusedSignageParts[0];
+        const signageFile = visualPdfs.find(
+          (file) => file.id === primarySignage.source.materialVersionId,
+        );
+        let focusedPages: LocatedContent[] = [];
+        if (signageFile) {
+          const { data } = await supabase.storage
+            .from("gv-materials")
+            .download(signageFile.storage_path);
+          if (data)
+            try {
+              const cropped = await cropVisualPdf(
+                new Uint8Array(await data.arrayBuffer()),
+                signageFile.file_name,
+              );
+              focusedPages = [
+                {
+                  pdfDataUrl: cropped.dataUrl,
+                  pdfFileName: signageFile.file_name,
+                  pdfPageCount: cropped.originalPages.length,
+                  pdfOriginalPages: cropped.originalPages,
+                  source: {
+                    materialVersionId: signageFile.id,
+                    note: "千问 PDF 聚焦标识视觉补读候选；引用原件页码",
+                  },
+                },
+              ];
+            } catch {
+              // Full source is still available if a page cannot be cropped.
+            }
+        }
+        let signageFinding = null;
+        for (const parts of [focusedPages, focusedSignageParts]) {
+          if (!parts.length || signageFinding) break;
+          const signage = await aiProvider.inspectR05Signage({
+            ruleVersion: rulePackage.package_version,
+            visualParts: parts,
+          });
+          if (!signage.ok) continue;
+          usage.inputTokens += signage.usage.inputTokens;
+          usage.outputTokens += signage.usage.outputTokens;
+          usage.billablePages += signage.usage.billablePages ?? 0;
+          signageFinding = verifiedR05SignageFinding(signage.value, parts);
+        }
+        if (signageFinding)
+          semanticResults.set("R05", {
+            ...r05Assessment,
+            supportedFindings: mergeVerifiedR05Signage(
+              r05Assessment.supportedFindings,
+              signageFinding,
+              r05VisualParts,
+            ),
+          });
+      }
     }
-    const results = calculated.map((result) => {
+    const results: GvComputedResult[] = calculated.map((result) => {
       const match = semanticResults.get(result.ruleId);
       if (!match && semanticResults.size)
         errors.push(`${result.ruleId} 未返回可验证的 AI 核查结果`);
@@ -680,33 +1130,51 @@ export async function POST(
       const citations = (match?.citations ?? [])
         .map((source) => retrievedSource(source, scopedEvidence))
         .filter((source): source is SourceLocation => source !== null);
+      const citedFindings = (match?.supportedFindings ?? []).flatMap(
+        (finding) =>
+          finding.citations
+            .map((source) => retrievedSource(source, scopedEvidence))
+            .filter((source): source is SourceLocation => source !== null),
+      );
       const unlocated = Boolean(
-        match && match.support !== "unknown" && !citations.length,
+        match &&
+          match.support !== "unknown" &&
+          !citations.length &&
+          !citedFindings.length,
       );
       const verifiedFindings = (findings: unknown, requireCitation: boolean) =>
         Array.isArray(findings)
-          ? findings
-              .flatMap((finding) => {
-                if (
-                  !finding ||
-                  typeof finding !== "object" ||
-                  typeof finding.text !== "string" ||
-                  !Array.isArray(finding.citations)
+          ? findings.flatMap((finding) => {
+              if (
+                !finding ||
+                typeof finding !== "object" ||
+                typeof finding.text !== "string" ||
+                !Array.isArray(finding.citations)
+              )
+                return [];
+              const located = finding.citations
+                .map((source: SourceLocation) =>
+                  retrievedSource(source, scopedEvidence),
                 )
-                  return [];
-                const located = finding.citations
-                  .map((source: SourceLocation) =>
-                    retrievedSource(source, scopedEvidence),
-                  )
-                  .filter(
-                    (source: SourceLocation | null): source is SourceLocation =>
-                      source !== null,
-                  );
-                return located.length || !requireCitation
-                  ? [{ text: finding.text.slice(0, 300), citations: located }]
-                  : [];
-              })
-              .slice(0, 5)
+                .filter(
+                  (source: SourceLocation | null): source is SourceLocation =>
+                    source !== null,
+                );
+              return located.length || !requireCitation
+                ? [
+                    {
+                      text: finding.text,
+                      citations: located,
+                      sourceStatements: Array.isArray(finding.sourceStatements)
+                        ? finding.sourceStatements.filter(
+                            (item: unknown): item is string =>
+                              typeof item === "string",
+                          )
+                        : undefined,
+                    },
+                  ]
+                : [];
+            })
           : [];
       const rawSupportedFindings = unlocated
         ? []
@@ -720,6 +1188,7 @@ export async function POST(
           result.ruleId,
           rawSupportedFindings,
           rawUnverifiedFindings,
+          result,
         );
       if (result.ruleId === "R01" && basementTotals.length >= 2) {
         const subtotal = basementTotals.reduce(
@@ -727,29 +1196,41 @@ export async function POST(
           0,
         );
         const declared = facts.total_parking_spaces.value;
+        const siteRun =
+          drawingNumberRuns.length === 1 ? drawingNumberRuns[0] : null;
+        const siteSentence = siteRun
+          ? `场地图纸车位位号 1—${siteRun.last}，文字层直接读到 ${siteRun.readCount} 个${siteRun.missing.length ? `，${siteRun.missing.join("、")} 号须查看原图` : "，无漏号"}；地面候选 ${siteRun.last} 个。`
+          : "";
         const floors = basementTotals
           .map((item) => `B${item.floor} ${item.count} 个`)
           .join("、");
         supportedFindings.push({
           text:
-            `${floors}；已识别地下层合计 ${subtotal} 个。` +
+            `${floors}；已识别地下层合计 ${subtotal} 个。${siteSentence}` +
             (declared !== null
               ? declared >= subtotal
-                ? `申报总车位为 ${declared} 个，剩余 ${declared - subtotal} 个的来源及统计范围待核对；不能凭差额推定车位位置。`
+                ? siteRun && subtotal + siteRun.last === declared
+                  ? `地下层与地面候选合计 ${declared} 个，与申报总车位一致；漏号、统计范围和重复计数仍待核对。`
+                  : `申报总车位为 ${declared} 个，剩余 ${declared - subtotal} 个的来源及统计范围待核对；不能凭差额推定车位位置。`
                 : `已识别地下层车位多于申报总数 ${declared} 个，须核对分区是否重复、图纸版本和统计范围。`
               : "申报总车位仍待确认，不能将这两层直接当作项目总数。"),
           citations: [
             ...basementTotals.map((item) => item.source),
+            ...(siteRun ? [siteRun.source] : []),
             ...facts.total_parking_spaces.sources,
           ],
         });
       }
+      const uniqueSupportedFindings = dedupeRuleSupport(
+        result.ruleId,
+        supportedFindings,
+      );
       const semanticSupport = unlocated
         ? "unknown"
         : calibrateCandidateSupport(
             result,
             match?.support ?? "unknown",
-            supportedFindings,
+            uniqueSupportedFindings,
             unverifiedFindings,
           );
       return {
@@ -760,13 +1241,13 @@ export async function POST(
         ),
         semanticSupport,
         citations,
-        supportedFindings,
+        supportedFindings: uniqueSupportedFindings,
         unverifiedFindings,
         basisRetrieval: basisReceipts.get(result.ruleId),
         retrievedSources: scopedEvidence.map((part) => part.source),
         visualEvidenceUsed: [
           ...citations,
-          ...supportedFindings.flatMap((finding) => finding.citations),
+          ...uniqueSupportedFindings.flatMap((finding) => finding.citations),
         ].some((source) => source.note?.includes("PDF 视觉识别")),
         gaps: [
           ...(match?.gaps ?? []).filter(
@@ -784,6 +1265,82 @@ export async function POST(
         ),
       };
     });
+    if (process.env.GV_RULE_GUIDANCE_RAG_ENABLED !== "false") {
+      const guidanceQuestions = results
+        .flatMap((result) => {
+          const pending =
+            result.unverifiedFindings?.map((item) => item.text) ?? [];
+          const questions = [
+            ...new Set(
+              pending.length ? pending : (result.humanQuestions ?? []),
+            ),
+          ]
+            .filter((question) => question.trim())
+            .slice(0, 3);
+          return questions.flatMap((question, questionIndex) => {
+            const chunks = retrieveGvGuidanceChunks(
+              result.ruleId,
+              [question],
+              2,
+            );
+            return chunks.length
+              ? [{ ruleCode: result.ruleId, questionIndex, question, chunks }]
+              : [];
+          });
+        })
+        .slice(0, 12);
+      const retrieved = new Map(
+        guidanceQuestions.map(
+          (item) =>
+            [
+              `${item.ruleCode}:${item.questionIndex}`,
+              { question: item.question, chunks: item.chunks },
+            ] as const,
+        ),
+      );
+      if (guidanceQuestions.length) {
+        const guidance = await aiProvider.explainRuleGuidance({
+          ruleVersion: rulePackage.package_version,
+          questions: guidanceQuestions.map((item) => ({
+            ruleCode: item.ruleCode,
+            questionIndex: item.questionIndex,
+            question: item.question,
+            chunks: item.chunks.map(({ id, clause, page, quote }) => ({
+              id,
+              clause,
+              page,
+              quote,
+            })),
+          })),
+        });
+        if (guidance.ok) {
+          usage.inputTokens += guidance.usage.inputTokens;
+          usage.outputTokens += guidance.usage.outputTokens;
+          const validated = validateGvGuidance(
+            guidance.value,
+            retrieved,
+            rulePackage.package_version,
+          );
+          for (const result of results) {
+            if (
+              !guidanceQuestions.some((item) => item.ruleCode === result.ruleId)
+            )
+              continue;
+            result.ruleGuidance = validated.get(result.ruleId) ?? [];
+            result.ruleGuidanceStatus = result.ruleGuidance.length
+              ? "FOUND"
+              : "NOT_FOUND";
+          }
+        } else {
+          for (const result of results) {
+            if (
+              guidanceQuestions.some((item) => item.ruleCode === result.ruleId)
+            )
+              result.ruleGuidanceStatus = "FAILED";
+          }
+        }
+      }
+    }
     const { data: currentRound } = await supabase
       .from("task_rounds")
       .select(
@@ -797,7 +1354,7 @@ export async function POST(
       currentRound.rule_version_id !== rulePackage.id ||
       JSON.stringify(currentRound.selected_material_version_ids) !==
         JSON.stringify(ids) ||
-      !["open", "returned"].includes(currentRound.status)
+      !["open", "returned", "submitted"].includes(currentRound.status)
     ) {
       const result = failure(
         "CONFLICT",
@@ -818,7 +1375,11 @@ export async function POST(
         error_message: errors.join("；") || null,
         usage,
         provider: "qwen",
-        model: model || "未完成模型核查",
+        model: model
+          ? reuseParsedMaterials
+            ? `${model}（复用材料解析）`
+            : model
+          : "未完成模型核查",
         created_by: actor.id,
       })
       .select("id, status, error_message")
@@ -829,7 +1390,9 @@ export async function POST(
         run,
         errors.length
           ? "规则计算已保存；AI 部分步骤未完成，请按提示人工接续。"
-          : "GV 适用规则已完成候选初审，请逐项核对原件并保存专业判断。",
+          : reuseParsedMaterials
+            ? "已复用材料解析并重新执行字段提取、规则计算、语义核查和规则提示；未重新读取 PDF 图像。"
+            : "GV 适用规则已完成候选初审，请逐项核对原件并保存专业判断。",
       ),
     );
   } catch (error) {

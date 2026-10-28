@@ -1,6 +1,6 @@
 # 分享版本迁移编号
 
-仅用于全新数据库，不要用于已有原编号迁移记录的数据库。SQL 内容保持原样，时间编号补齐到 14 位，防止短编号的基础表迁移排在长编号增量之后。
+首次安装使用全新数据库；已使用本分享仓库 14 位迁移编号的数据库可增量更新，不要用于已有原开发编号迁移记录的数据库。SQL 内容保持原样，时间编号补齐到 14 位，防止短编号的基础表迁移排在长编号增量之后。
 
 | 原文件 | 分享文件 |
 | --- | --- |
@@ -32,3 +32,6 @@
 | 202610250002_project_create_atomic.sql | 20261025000200_project_create_atomic.sql |
 | 202610260001_admin_material_removal.sql | 20261026000100_admin_material_removal.sql |
 | 202610260002_admin_remove_unselected_submitted.sql | 20261026000200_admin_remove_unselected_submitted.sql |
+| 202610260003_gv_run_clear.sql | 20261026000300_gv_run_clear.sql |
+| 202610260004_submitted_gv_ai_rerun.sql | 20261026000400_submitted_gv_ai_rerun.sql |
+| 202610260005_gv_run_display_selection.sql | 20261026000500_gv_run_display_selection.sql |

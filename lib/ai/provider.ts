@@ -58,6 +58,19 @@ export interface RuleEvidenceAssessment extends EvidenceAssessment {
   unverifiedFindings: { text: string; citations: SourceLocation[] }[];
 }
 
+export interface RuleGuidanceSuggestion {
+  ruleCode: string;
+  questionIndex: number;
+  text: string;
+  chunkId: string;
+}
+
+export interface R05SignageAssessment {
+  visible: boolean;
+  finding: string;
+  citations: SourceLocation[];
+}
+
 export interface AiProvider {
   extractCandidates(input: {
     taskId: string;
@@ -86,6 +99,19 @@ export interface AiProvider {
       evidenceParts: LocatedContent[];
     }[];
   }): Promise<AiResult<RuleEvidenceAssessment[]>>;
+  inspectR05Signage(input: {
+    ruleVersion: string;
+    visualParts: LocatedContent[];
+  }): Promise<AiResult<R05SignageAssessment>>;
+  explainRuleGuidance(input: {
+    ruleVersion: string;
+    questions: {
+      ruleCode: string;
+      questionIndex: number;
+      question: string;
+      chunks: { id: string; clause: string; page: number; quote: string }[];
+    }[];
+  }): Promise<AiResult<RuleGuidanceSuggestion[]>>;
   draftOpinion(input: {
     taskId: string;
     roundId: string;

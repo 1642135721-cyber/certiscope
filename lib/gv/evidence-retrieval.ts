@@ -9,6 +9,12 @@ type Fragment = {
   status: string;
 };
 
+export type FieldEvidenceAnchor = {
+  fieldKey: string;
+  source: SourceLocation;
+  value?: unknown;
+};
+
 const terms: Record<GvRuleCode, string[]> = {
   R01: [
     "parking",
@@ -91,10 +97,61 @@ function locationKey(source: SourceLocation): string {
   return [
     source.materialVersionId,
     source.page ?? "",
+    source.image ?? "",
     source.sheet ?? "",
     source.cell ?? "",
     source.paragraph ?? "",
   ].join(":");
+}
+
+const compareText = (left: string, right: string) =>
+  left < right ? -1 : left > right ? 1 : 0;
+
+function stableFragmentOrder(
+  left: Fragment,
+  right: Fragment,
+  selectedIds: string[],
+) {
+  const materialOrder =
+    selectedIds.indexOf(left.material_version_id) -
+    selectedIds.indexOf(right.material_version_id);
+  if (materialOrder) return materialOrder;
+  const leftSource = left.source_location ?? {
+    materialVersionId: left.material_version_id,
+  };
+  const rightSource = right.source_location ?? {
+    materialVersionId: right.material_version_id,
+  };
+  return (
+    (leftSource.page ?? 0) - (rightSource.page ?? 0) ||
+    (leftSource.image ?? 0) - (rightSource.image ?? 0) ||
+    compareText(leftSource.sheet ?? "", rightSource.sheet ?? "") ||
+    compareText(leftSource.cell ?? "", rightSource.cell ?? "") ||
+    (leftSource.paragraph ?? 0) - (rightSource.paragraph ?? 0) ||
+    compareText(left.text_content, right.text_content)
+  );
+}
+
+function sourceMatchesAnchor(fragment: Fragment, anchor: FieldEvidenceAnchor) {
+  const actual = fragment.source_location;
+  if (!actual) return false;
+  const expected = anchor.source;
+  if (fragment.material_version_id !== expected.materialVersionId) return false;
+  const hasPosition =
+    expected.page !== undefined ||
+    expected.image !== undefined ||
+    expected.sheet !== undefined ||
+    expected.cell !== undefined ||
+    expected.paragraph !== undefined;
+  return (
+    hasPosition &&
+    (expected.page === undefined || actual.page === expected.page) &&
+    (expected.image === undefined || actual.image === expected.image) &&
+    (expected.sheet === undefined || actual.sheet === expected.sheet) &&
+    (expected.cell === undefined || actual.cell === expected.cell) &&
+    (expected.paragraph === undefined ||
+      actual.paragraph === expected.paragraph)
+  );
 }
 
 /** Select bounded, source-located excerpts from the current round only. */
@@ -103,6 +160,7 @@ export function retrieveGvEvidence(
   ruleCodes: GvRuleCode[],
   selectedIds: string[],
   limit = 12000,
+  enhancedCoverage = false,
 ): LocatedContent[] {
   const available = fragments.filter(
     (item) =>
@@ -115,7 +173,8 @@ export function retrieveGvEvidence(
   const perFile = new Map<string, number>();
   let remaining = limit;
   const add = (fragment: Fragment, hits: number[]) => {
-    const source = fragment.source_location!;
+    const source = fragment.source_location;
+    if (!source) return;
     const text = excerpt(fragment.text_content.trim(), hits);
     const key = `${locationKey(source)}:${text}`;
     if (seen.has(key) || remaining < 120) return;
@@ -141,7 +200,8 @@ export function retrieveGvEvidence(
         return { fragment, hits };
       })
       .sort((a, b) => b.hits.length - a.hits.length);
-    if (ranked[0]) add(ranked[0].fragment, ranked[0].hits);
+    for (const item of ranked.slice(0, enhancedCoverage ? 2 : 1))
+      add(item.fragment, item.hits);
   }
   for (const ruleCode of ruleCodes) {
     const ranked = available
@@ -153,7 +213,9 @@ export function retrieveGvEvidence(
       .sort((a, b) => b.score - a.score);
     const locations = new Set<string>();
     for (const item of ranked) {
-      const key = locationKey(item.fragment.source_location!);
+      const source = item.fragment.source_location;
+      if (!source) continue;
+      const key = locationKey(source);
       if (locations.has(key)) continue;
       add(item.fragment, item.hits);
       locations.add(key);
@@ -169,6 +231,7 @@ export function retrieveGvRuleEvidence(
   ruleCodes: GvRuleCode[],
   selectedIds: string[],
   perRuleLimit = 3200,
+  fieldAnchors?: ReadonlyMap<GvRuleCode, FieldEvidenceAnchor[]>,
 ): Map<GvRuleCode, LocatedContent[]> {
   const available = fragments.filter(
     (item) =>
@@ -179,7 +242,10 @@ export function retrieveGvRuleEvidence(
   );
   const result = new Map<GvRuleCode, LocatedContent[]>();
   for (const code of ruleCodes) {
-    const ranked = available
+    const ordered = fieldAnchors
+      ? [...available].sort((a, b) => stableFragmentOrder(a, b, selectedIds))
+      : available;
+    const ranked = ordered
       .map((fragment, order) => {
         const hits = positions(fragment.text_content, terms[code]);
         return { fragment, hits, order, score: hits.length };
@@ -190,6 +256,72 @@ export function retrieveGvRuleEvidence(
     const perFile = new Map<string, number>();
     let remaining =
       code === "R06" ? Math.max(perRuleLimit, 4200) : perRuleLimit;
+    const select = (item: (typeof ranked)[number]) => {
+      const source = item.fragment.source_location;
+      if (!source) return false;
+      const key = locationKey(source);
+      if (
+        seen.has(key) ||
+        (perFile.get(item.fragment.material_version_id) ?? 0) >= 2 ||
+        chosen.length >= 6 ||
+        remaining < 120
+      )
+        return false;
+      const excerptLength = code === "R06" ? 1450 : 850;
+      const text = excerpt(
+        item.fragment.text_content.trim(),
+        item.hits,
+        excerptLength,
+      ).slice(0, Math.min(excerptLength + 1, remaining));
+      if (!text) return false;
+      chosen.push({ text, source });
+      seen.add(key);
+      perFile.set(
+        item.fragment.material_version_id,
+        (perFile.get(item.fragment.material_version_id) ?? 0) + 1,
+      );
+      remaining -= text.length;
+      return true;
+    };
+    if (fieldAnchors) {
+      const anchors = fieldAnchors.get(code) ?? [];
+      const byLocation = new Map<string, FieldEvidenceAnchor[]>();
+      for (const anchor of anchors) {
+        const key = locationKey(anchor.source);
+        byLocation.set(key, [...(byLocation.get(key) ?? []), anchor]);
+      }
+      const anchored = [...byLocation.values()]
+        .sort(
+          (a, b) =>
+            new Set(b.map((item) => item.fieldKey)).size -
+              new Set(a.map((item) => item.fieldKey)).size ||
+            compareText(locationKey(a[0].source), locationKey(b[0].source)),
+        )
+        .flatMap((group) => {
+          const fragment = ordered.find((item) =>
+            sourceMatchesAnchor(item, group[0]),
+          );
+          if (!fragment) return [];
+          const valueHits = group.flatMap((anchor) => {
+            const value = anchor.value;
+            if (typeof value !== "string" && typeof value !== "number")
+              return [];
+            const at = fragment.text_content
+              .toLowerCase()
+              .indexOf(String(value).toLowerCase());
+            return at >= 0 ? [at] : [];
+          });
+          const hits = valueHits.length
+            ? valueHits.sort((a, b) => a - b)
+            : positions(fragment.text_content, terms[code]);
+          return [{ fragment, hits, order: 0, score: hits.length }];
+        });
+      let anchoredCount = 0;
+      for (const item of anchored) {
+        if (anchoredCount >= 3) break;
+        if (select(item)) anchoredCount++;
+      }
+    }
     for (const item of ranked) {
       if (chosen.length >= 6 || remaining < 120) break;
       if (code === "R02" && item.score === 0) continue;
@@ -200,27 +332,7 @@ export function retrieveGvRuleEvidence(
         (chosen.length >= 4 || perFile.has(item.fragment.material_version_id))
       )
         continue;
-      const source = item.fragment.source_location!;
-      const key = locationKey(source);
-      if (
-        seen.has(key) ||
-        (perFile.get(item.fragment.material_version_id) ?? 0) >= 2
-      )
-        continue;
-      const excerptLength = code === "R06" ? 1450 : 850;
-      const text = excerpt(
-        item.fragment.text_content.trim(),
-        item.hits,
-        excerptLength,
-      ).slice(0, Math.min(excerptLength + 1, remaining));
-      if (!text) continue;
-      chosen.push({ text, source });
-      seen.add(key);
-      perFile.set(
-        item.fragment.material_version_id,
-        (perFile.get(item.fragment.material_version_id) ?? 0) + 1,
-      );
-      remaining -= text.length;
+      select(item);
     }
     result.set(code, chosen);
   }
