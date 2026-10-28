@@ -2,8 +2,13 @@ import { ArrowLeft, Bell, Building2, Leaf, MapPin, Search } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 import type { ReactNode } from "react";
+import {
+  projectDisplayName,
+  projectDisplayValue,
+  userDisplayName,
+} from "@/lib/gv/presentation";
 import type { BusinessRole } from "@/lib/gv/types";
-import { projectDisplayName, projectDisplayValue, userDisplayName } from "@/lib/gv/presentation";
+import { FloatingGvQa } from "./floating-gv-qa";
 import { WorkspaceNav } from "./workspace-nav";
 
 type ProjectSummary = {
@@ -55,8 +60,16 @@ export function ProjectShell({
           href="/welcome"
           className="flex items-center gap-3 whitespace-nowrap font-bold"
         >
-          <Image src="/images/certiscope-mark.png" alt="" width={38} height={38} className="object-contain" />
-          <span className="text-[22px] tracking-tight">Certi<span className="text-[#31951f]">Scope</span></span>
+          <Image
+            src="/images/certiscope-mark.png"
+            alt=""
+            width={38}
+            height={38}
+            className="object-contain"
+          />
+          <span className="text-[22px] tracking-tight">
+            Certi<span className="text-[#31951f]">Scope</span>
+          </span>
           <span className="hidden text-base md:inline">绿色建筑审核</span>
         </Link>
         <div className="hidden h-11 w-[440px] items-center gap-3 rounded-xl bg-[#f3f6f6] px-4 text-[#93a1aa] lg:flex">
@@ -65,7 +78,9 @@ export function ProjectShell({
         </div>
         <div className="flex items-center gap-5 text-[#5d7181]">
           <Bell size={21} />
-          <span className="hidden text-sm sm:inline">{userDisplayName(actor.displayName, actor.role)}</span>
+          <span className="hidden text-sm sm:inline">
+            {userDisplayName(actor.displayName, actor.role)}
+          </span>
         </div>
       </header>
 
@@ -88,20 +103,26 @@ export function ProjectShell({
                   <ArrowLeft size={17} /> 返回项目中心
                 </Link>
                 <h1 className="mt-4 text-3xl font-bold md:text-[42px]">
-                  {project ? projectDisplayName(project.name) : "项目"} · GV 审核任务
+                  {project ? projectDisplayName(project.name) : "项目"} · GV
+                  审核任务
                 </h1>
                 <p className="mt-2 text-sm text-[#5f7180] md:text-lg">
-                  {declaredScope || "认证体系与版本待核对"} · LT / Green Vehicles ·{" "}
-                  {task.stage || "审核阶段待核对"} · 第 {roundSequence} 轮
+                  {declaredScope || "认证体系与版本待核对"} · LT / Green
+                  Vehicles · {task.stage || "审核阶段待核对"} · 第{" "}
+                  {roundSequence} 轮
                 </p>
                 <div className="mt-5 flex flex-wrap gap-x-7 gap-y-2 text-sm text-[#536777] md:text-base">
                   <span className="inline-flex items-center gap-2">
                     <MapPin size={18} />
-                    {project ? projectDisplayValue(project.location) : "地点待核对"}
+                    {project
+                      ? projectDisplayValue(project.location)
+                      : "地点待核对"}
                   </span>
                   <span className="inline-flex items-center gap-2">
                     <Building2 size={18} />
-                    {project ? projectDisplayValue(project.project_type) : "类型待核对"}
+                    {project
+                      ? projectDisplayValue(project.project_type)
+                      : "类型待核对"}
                   </span>
                   <span>
                     {project
@@ -121,13 +142,23 @@ export function ProjectShell({
             >
               {tabs.map((tab) => {
                 const className = `shrink-0 py-4 ${active === tab.key ? "border-b-[3px] border-[#129262] font-bold text-[#087b52]" : "hover:text-[#087c53]"}`;
-                return <Link key={tab.key} href={tab.href} aria-current={active === tab.key ? "page" : undefined} className={className}>{tab.label}</Link>;
+                return (
+                  <Link
+                    key={tab.key}
+                    href={tab.href}
+                    aria-current={active === tab.key ? "page" : undefined}
+                    className={className}
+                  >
+                    {tab.label}
+                  </Link>
+                );
               })}
             </nav>
             <div className="mt-4">{children}</div>
           </div>
         </main>
       </div>
+      <FloatingGvQa />
     </div>
   );
 }

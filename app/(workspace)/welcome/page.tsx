@@ -116,7 +116,7 @@ export default async function WelcomePage() {
               <ChevronRight aria-hidden="true" size={24} />
             </span>
             <span className="welcome-card-copy">
-              标准规范与解读
+              标准规范与问答
               <br />
               行业知识库
             </span>

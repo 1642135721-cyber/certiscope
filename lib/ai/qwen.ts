@@ -60,6 +60,29 @@ function normalizeFindings(value: unknown) {
 }
 
 export class QwenProvider implements AiProvider {
+  answerGvQuestion(
+    input: Parameters<AiProvider["answerGvQuestion"]>[0],
+  ): Promise<
+    AiResult<{ answer: string; chunkIds: string[]; insufficient: boolean }>
+  > {
+    return this.ask(
+      "你是 GV（绿色车辆）官方规范问答助手。历史对话只用于理解追问，不作为规范依据；只根据本次提供的官方原文片段用中文回答规范含义，不引用其他知识，也不判断具体项目是否通过。用户可自由提问；当问题超出 GV 或片段不能直接支持回答时，返回 answer='未检索到相关知识'、insufficient=true、chunkIds=[]。每个明确的规则主张都必须有实际片段依据，不要把原文中的示例数字当通用要求。返回 {answer,chunkIds,insufficient}，chunkIds 只能列实际支撑答案的输入片段 ID。",
+      input,
+      (
+        value,
+      ): value is {
+        answer: string;
+        chunkIds: string[];
+        insufficient: boolean;
+      } =>
+        isRecord(value) &&
+        typeof value.answer === "string" &&
+        Array.isArray(value.chunkIds) &&
+        value.chunkIds.every((id: unknown) => typeof id === "string") &&
+        typeof value.insufficient === "boolean",
+    );
+  }
+
   private async ask<T>(
     instruction: string,
     payload: unknown,

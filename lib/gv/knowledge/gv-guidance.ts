@@ -252,6 +252,35 @@ export function retrieveGvGuidanceChunks(
     .map(({ chunk }) => chunk);
 }
 
+const qaTopics: { code: GvRuleCode; pattern: RegExp }[] = [
+  { code: "R01", pattern: /R01|总车位|停车总数|停车分母|申报路径|路外停车/i },
+  { code: "R02", pattern: /R02|资格|ACEEE|车型|评分|等效标准/i },
+  { code: "R03", pattern: /R03|优先车位|优先停车|车位分布|近入口/i },
+  { code: "R04", pattern: /R04|折扣|费率|优惠停车|公示/i },
+  { code: "R05", pattern: /R05|充电车位|充电位|车位重叠|车位独立/i },
+  {
+    code: "R06",
+    pattern: /R06|充电设备|充电桩|电压|连接器|联网|需求响应|分时电价|DR|TOU/i,
+  },
+  { code: "R07", pattern: /R07|替代燃料|天然气|换电|每日服务|服务能力/i },
+];
+
+export function retrieveGvQaChunks(question: string, previousQuestion = "") {
+  const query = `${question} ${previousQuestion}`;
+  const matched = qaTopics
+    .filter((topic) => topic.pattern.test(query))
+    .map((topic) => topic.code);
+  const codes = matched.length
+    ? matched
+    : /GV|绿色车辆|绿色车|LEED/i.test(query)
+      ? qaTopics.map((topic) => topic.code)
+      : [];
+  const perRule = codes.length === 1 ? 4 : codes.length <= 2 ? 3 : 1;
+  return codes
+    .flatMap((code) => retrieveGvGuidanceChunks(code, [query], perRule))
+    .slice(0, 8);
+}
+
 export function validateGvGuidance(
   entries: {
     ruleCode: string;

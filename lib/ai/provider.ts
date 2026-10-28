@@ -72,6 +72,13 @@ export interface R05SignageAssessment {
 }
 
 export interface AiProvider {
+  answerGvQuestion(input: {
+    question: string;
+    history: { question: string; answer: string }[];
+    chunks: { id: string; clause: string; page: number; quote: string }[];
+  }): Promise<
+    AiResult<{ answer: string; chunkIds: string[]; insufficient: boolean }>
+  >;
   extractCandidates(input: {
     taskId: string;
     roundId: string;

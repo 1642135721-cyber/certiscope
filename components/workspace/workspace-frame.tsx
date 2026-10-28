@@ -1,8 +1,9 @@
 import Image from "next/image";
 import Link from "next/link";
 import { logout } from "@/app/(auth)/login/actions";
-import type { BusinessRole } from "@/lib/gv/types";
 import { userDisplayName } from "@/lib/gv/presentation";
+import type { BusinessRole } from "@/lib/gv/types";
+import { FloatingGvQa } from "./floating-gv-qa";
 import { WorkspaceNav } from "./workspace-nav";
 
 export function WorkspaceFrame({
@@ -11,15 +12,30 @@ export function WorkspaceFrame({
   children,
 }: {
   actor: { displayName: string; role: BusinessRole };
-  active: "dashboard" | "tasks" | "projects" | "rules" | "settings" | "about";
+  active:
+    | "dashboard"
+    | "tasks"
+    | "projects"
+    | "rules"
+    | "rulesQa"
+    | "settings"
+    | "about";
   children: React.ReactNode;
 }) {
   return (
     <div className="dashboard-shell">
       <header className="dashboard-header">
         <Link href="/welcome" className="dashboard-brand">
-          <Image src="/images/certiscope-mark.png" alt="" width={38} height={38} className="dashboard-brand-mark" />
-          <strong>Certi<span>Scope</span></strong>
+          <Image
+            src="/images/certiscope-mark.png"
+            alt=""
+            width={38}
+            height={38}
+            className="dashboard-brand-mark"
+          />
+          <strong>
+            Certi<span>Scope</span>
+          </strong>
           <span>绿色建筑审核</span>
         </Link>
         <div className="dashboard-header-right">
@@ -49,6 +65,7 @@ export function WorkspaceFrame({
         <WorkspaceNav role={actor.role} active={active} />
         <main className="min-w-0 px-4 py-5 md:px-7">{children}</main>
       </div>
+      {active !== "rulesQa" && <FloatingGvQa />}
     </div>
   );
 }

@@ -25,8 +25,27 @@ vm.runInNewContext(compiled, {
   process,
   Date,
 });
-const { gvGuidanceChunks, retrieveGvGuidanceChunks, validateGvGuidance } =
-  module.exports;
+const {
+  gvGuidanceChunks,
+  retrieveGvGuidanceChunks,
+  retrieveGvQaChunks,
+  validateGvGuidance,
+} = module.exports;
+
+test("GV question retrieval selects relevant official clauses without a topic selector", () => {
+  const qualification = retrieveGvQaChunks("绿色车辆的资格具体是什么");
+  assert.ok(qualification.length > 0);
+  assert.ok(qualification.every((item) => item.ruleCode === "R02"));
+  assert.match(qualification[0].quote, /green score of 45/i);
+
+  const overlap = retrieveGvQaChunks("优先车位和充电车位能重叠吗");
+  assert.ok(overlap.some((item) => item.ruleCode === "R03"));
+  assert.ok(overlap.some((item) => item.ruleCode === "R05"));
+
+  const broad = retrieveGvQaChunks("GV 有什么要求？");
+  assert.equal(new Set(broad.map((item) => item.ruleCode)).size, 7);
+  assert.equal(retrieveGvQaChunks("今天的天气怎么样？").length, 0);
+});
 
 test("controlled GV corpus contains located official clauses for every rule", () => {
   for (const code of ["R01", "R02", "R03", "R04", "R05", "R06", "R07"]) {
